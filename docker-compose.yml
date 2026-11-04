@@ -1,0 +1,10 @@
+services:
+  web:
+    build: .
+    container_name: paintpartykits
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "127.0.0.1:3010:3000"   # only reachable from this server; Nginx forwards the public traffic
+    volumes:
+      - ./data:/app/data        # database + uploaded photos live here

@@ -1,0 +1,20 @@
+{
+  "name": "paint-party-kits",
+  "version": "1.0.0",
+  "description": "Paint Party Kits online store",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "13.0.3",
+    "cookie-session": "2.1.1",
+    "express": "5.3.0",
+    "multer": "2.5.0",
+    "zipcodes": "8.0.0"
+  },
+  "private": true,
+  "engines": {
+    "node": ">=22"
+  }
+}
