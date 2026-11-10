@@ -17,7 +17,8 @@ let store = null;                       // public store data from the server
 let cart = loadCart();
 const ui = { query: "", searchOpen: false, wantSearchFocus: false, qty: {}, method: "pickup", lastOrder: null,
   contactSent: null, zipQuote: null, zipFor: "", busy: false };
-const admin = { authed: false, data: null, tab: "products", draft: null, sdraft: null, ddraft: null, deleteArmed: false, busy: false, loginError: "" };
+const admin = { authed: false, data: null, tab: "products", draft: null, sdraft: null, ddraft: null, deleteArmed: false, busy: false, loginError: "",
+  an: null, anRange: "30", anLoading: false };
 
 /* ---------------- helpers ---------------- */
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -40,6 +41,37 @@ async function api(method, url, body) {
   catch (e) { const err = new Error("We couldn’t reach the website. Check your connection and try again."); err.status = 0; throw err; }
   if (!res.ok) { const err = new Error(json.error || "Something went wrong. Please try again."); err.status = res.status; err.errors = json.errors || {}; throw err; }
   return json;
+}
+/* ---------------- anonymous visit counting (shown only in the owner's Analytics tab) ---------------- */
+const rid = () => Array.from(crypto.getRandomValues(new Uint8Array(12)), b => b.toString(36).padStart(2, "0")).join("").slice(0, 20);
+function analyticsIds() {
+  let visitor = "", visit = "", now = Date.now();
+  try {
+    visitor = localStorage.getItem("ppk-vid") || "";
+    if (!/^[a-z0-9]{8,40}$/.test(visitor)) { visitor = rid(); localStorage.setItem("ppk-vid", visitor); }
+  } catch (e) { visitor = visitor || (window.__ppkVid ||= rid()); }
+  try {
+    const v = JSON.parse(sessionStorage.getItem("ppk-visit") || "null");
+    visit = v && now - v.last < 30 * 60e3 ? v.id : "";              // a visit ends after 30 quiet minutes
+    if (!visit) visit = rid();
+    sessionStorage.setItem("ppk-visit", JSON.stringify({ id: visit, last: now }));
+  } catch (e) { visit = window.__ppkVisit ||= rid(); }
+  return { visitor, visit };
+}
+let firstView = true;
+function track(type, extra) {
+  if (IS_ADMIN) return;
+  const body = { ...analyticsIds(), type, ...extra };
+  if (type === "pageview" && firstView) {
+    firstView = false;
+    body.ref = document.referrer;
+    try { body.utm = new URLSearchParams(location.search).get("utm_source") || ""; } catch (e) {}
+  }
+  fetch("/api/track", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), keepalive: true, credentials: "same-origin" }).catch(() => {});
+}
+function pageName(r) {
+  if (r.startsWith("kit-")) return { page: "kit", product: r.slice(4) };
+  return { page: ["cart", "checkout", "order-sent", "contact"].includes(r) ? r : "home" };
 }
 function loadCart() { try { const c = JSON.parse(localStorage.getItem(CART_KEY) || "[]"); return Array.isArray(c) ? c : []; } catch (e) { return []; } }
 function saveCart() { try { localStorage.setItem(CART_KEY, JSON.stringify(cart)); } catch (e) {} }
@@ -115,7 +147,7 @@ function nudgeText(p, q) {
 function addToCart(id, qty) {
   const l = cart.find(x => x.id === id);
   if (l) l.qty = Math.min(999, l.qty + qty); else cart.push({ id, qty });
-  saveCart();
+  saveCart(); track("add_to_cart", { product: id });
   const btn = document.getElementById("cartBtn");
   if (btn) { btn.querySelector(".cart-count").textContent = cartCount(); btn.classList.remove("bump"); void btn.offsetWidth; btn.classList.add("bump"); }
   toast(qty === 1 ? "Added to cart" : `${qty} kits added to cart`, { go: "cart", label: "View cart" });
@@ -357,7 +389,7 @@ async function placeOrder(form) {
   ui.busy = true; setBusy(btn, true, "Sending…");
   try {
     const res = await api("POST", "/api/orders", {
-      items: cart.map(l => ({ id: l.id, qty: l.qty })), method, date: f.date, notes: f.notes, botcheck: f.botcheck ? "on" : "",
+      items: cart.map(l => ({ id: l.id, qty: l.qty })), method, analytics: analyticsIds(), date: f.date, notes: f.notes, botcheck: f.botcheck ? "on" : "",
       customer: { name: f.name, phone: f.phone, email: f.email },
       address: method === "delivery" ? { street: f.street, unit: f.unit, city: f.city, state: f.state, zip: (f.zip || "").trim() } : null
     });
@@ -427,7 +459,7 @@ async function sendMessage(form) {
   const btn = form.querySelector('button[type="submit"]');
   ui.busy = true; setBusy(btn, true, "Sending…");
   try {
-    const res = await api("POST", "/api/messages", { ...f, botcheck: f.botcheck ? "on" : "" });
+    const res = await api("POST", "/api/messages", { ...f, botcheck: f.botcheck ? "on" : "", analytics: analyticsIds() });
     await sendEmail(res.email, res.message.email, res.message.name);
     ui.contactSent = res.message.name.split(" ")[0]; render();
   } catch (e) { if (e.errors) showErrs(form, e.errors); alertEl.textContent = e.message; }
@@ -460,9 +492,9 @@ function viewAdmin() {
   const d = admin.data;
   const newOrders = d.orders.filter(o => o.status === "New").length, newMsgs = d.messages.filter(m => m.status === "New").length;
   const tab = (k, label, badge) => `<button role="tab" aria-selected="${admin.tab === k}" data-tab="${k}">${label}${badge ? `<span class="badge">${badge}</span>` : ""}</button>`;
-  const body = { products: adminProducts, season: adminSeason, delivery: adminDelivery, orders: adminOrders, messages: adminMessages }[admin.tab] || adminProducts;
+  const body = { products: adminProducts, season: adminSeason, delivery: adminDelivery, orders: adminOrders, messages: adminMessages, analytics: adminAnalytics }[admin.tab] || adminProducts;
   return adminTop() + `<main class="wrap">
-    <div class="tabs" role="tablist">${tab("products", "Products")}${tab("season", "Seasonal look")}${tab("delivery", "Delivery")}${tab("orders", "Orders", newOrders)}${tab("messages", "Messages", newMsgs)}</div>
+    <div class="tabs" role="tablist">${tab("products", "Products")}${tab("season", "Seasonal look")}${tab("delivery", "Delivery")}${tab("orders", "Orders", newOrders)}${tab("messages", "Messages", newMsgs)}${tab("analytics", "Analytics")}</div>
     ${body()}
     <div style="height:40px"></div>
   </main>`;
@@ -667,6 +699,96 @@ function adminMessages() {
   </div>`).join("")}</div>`;
 }
 
+/* analytics */
+async function loadAnalytics() {
+  admin.anLoading = true; if (admin.tab === "analytics") render(true);
+  try { admin.an = await api("GET", `/api/admin/analytics?range=${encodeURIComponent(admin.anRange)}&tz=${-new Date().getTimezoneOffset()}`); }
+  catch (e) { adminFail(e); }
+  finally { admin.anLoading = false; if (admin.tab === "analytics" && admin.authed) render(true); }
+}
+const n0 = n => Number(n || 0).toLocaleString();
+const pct = (a, b) => b ? Math.round(a / b * 1000) / 10 + "%" : "–";
+const dayLabel = (d, opts) => new Date(d + "T12:00:00Z").toLocaleDateString([], { timeZone: "UTC", ...(opts || { month: "short", day: "numeric" }) });
+const PAGE_NAMES = { home: "Home page", kit: "A kit’s page", cart: "Cart", checkout: "Checkout", "order-sent": "Order sent", contact: "Contact page" };
+function barList(rows, labelFn, emptyText) {
+  if (!rows.length) return `<p class="fine">${emptyText}</p>`;
+  const max = Math.max(...rows.map(r => r.n), 1), total = rows.reduce((s, r) => s + r.n, 0);
+  return `<ul class="an-bars">${rows.map(r => `<li><div class="an-bar-label"><span>${esc(labelFn(r))}</span><b>${n0(r.n)} <small>${pct(r.n, total)}</small></b></div>
+    <div class="an-track"><i style="width:${Math.max(2, r.n / max * 100)}%"></i></div></li>`).join("")}</ul>`;
+}
+function adminAnalytics() {
+  const ranges = [["today", "Today"], ["7", "7 days"], ["30", "30 days"], ["90", "90 days"], ["all", "All time"]];
+  const head = `<div class="an-head">
+    <div class="an-ranges" role="group" aria-label="Time range">${ranges.map(([k, l]) => `<button data-range="${k}" aria-pressed="${admin.anRange === k}">${l}</button>`).join("")}</div>
+    <button class="btn line sm" data-an-refresh ${admin.anLoading ? "disabled" : ""}>${admin.anLoading ? "Loading…" : "Refresh"}</button>
+  </div>`;
+  const a = admin.an;
+  if (!a) return head + `<div class="loading">Loading analytics…</div>`;
+  const t = a.totals;
+  const rangeText = { today: "today", "7": "in the last 7 days", "30": "in the last 30 days", "90": "in the last 90 days", all: "since you started counting" }[a.range];
+  const tile = (label, value, sub) => `<div class="an-tile"><span>${label}</span><b>${value}</b>${sub ? `<small>${sub}</small>` : ""}</div>`;
+  const tiles = `<div class="an-tiles">
+    ${tile("Visitors", n0(t.visitors), `different people ${rangeText}`)}
+    ${tile("Visits", n0(t.visits), `${t.visits ? (t.pageviews / t.visits).toFixed(1) : 0} pages per visit`)}
+    ${tile("Page views", n0(t.pageviews), "every page anyone opened")}
+    ${tile("Returning visitors", n0(t.returning), `${pct(t.returning, t.visitors)} came back more than once`)}
+    ${tile("Added to cart", n0(t.adds), `${n0(a.funnel.added)} visits added a kit`)}
+    ${tile("Order requests", n0(t.orders), `${n0(t.kitsOrdered)} kits · ${money(t.revenue)} total`)}
+    ${tile("Contact messages", n0(t.messages), "sent from the Contact page")}
+    ${tile("Order rate", pct(a.funnel.ordered, a.funnel.visits), "of visits sent an order request")}
+  </div>`;
+
+  // visitors per day
+  const days = a.days, max = Math.max(1, ...days.map(d => d.visitors));
+  const step = Math.max(1, Math.ceil(days.length / 6));
+  const chart = days.length ? `<div class="an-card an-wide">
+    <div class="an-card-head"><h2>Visitors per day</h2><span class="fine">Hover or tap a bar for details</span></div>
+    <div class="an-chart" style="--n:${days.length}">
+      <div class="an-ymax">${n0(max)}</div>
+      <div class="an-cols">${days.map(d => `<div class="an-col" tabindex="0" aria-label="${esc(dayLabel(d.day))}: ${d.visitors} visitors">
+        <i style="height:${d.visitors ? Math.max(2, d.visitors / max * 100) : 0}%"></i>${d.orders ? `<em title="Order request"></em>` : ""}
+        <span class="an-tip"><b>${esc(dayLabel(d.day, { weekday: "short", month: "short", day: "numeric" }))}</b>
+          ${n0(d.visitors)} visitors<br>${n0(d.views)} page views<br>${n0(d.orders)} order requests<br>${n0(d.messages)} messages</span></div>`).join("")}</div>
+      <div class="an-xaxis">${days.map((d, i) => `<span>${(i % step === 0 && days.length - 1 - i >= step / 2) || i === days.length - 1 ? esc(dayLabel(d.day)) : ""}</span>`).join("")}</div>
+    </div>
+    <p class="fine an-legend"><i></i> Visitors <em></em> Day with an order request</p>
+    <details class="an-table"><summary>See the numbers day by day</summary>
+      <table><thead><tr><th>Day</th><th>Visitors</th><th>Page views</th><th>Orders</th><th>Messages</th></tr></thead>
+      <tbody>${days.slice().reverse().map(d => `<tr><td>${esc(dayLabel(d.day, { weekday: "short", month: "short", day: "numeric", year: "numeric" }))}</td><td>${n0(d.visitors)}</td><td>${n0(d.views)}</td><td>${n0(d.orders)}</td><td>${n0(d.messages)}</td></tr>`).join("")}</tbody></table>
+    </details>
+  </div>` : "";
+
+  // funnel
+  const f = a.funnel;
+  const steps = [["Visited the shop", f.visits], ["Looked at a kit", f.viewedKit], ["Added to cart", f.added], ["Opened checkout", f.checkout], ["Sent an order request", f.ordered]];
+  const funnel = `<div class="an-card">
+    <h2>From visit to order</h2><p class="fine">How many visits reached each step</p>
+    <ul class="an-bars">${steps.map(([l, v]) => `<li><div class="an-bar-label"><span>${l}</span><b>${n0(v)} <small>${pct(v, f.visits)}</small></b></div>
+      <div class="an-track"><i style="width:${f.visits ? Math.max(v ? 2 : 0, v / f.visits * 100) : 0}%"></i></div></li>`).join("")}</ul>
+  </div>`;
+
+  const kits = `<div class="an-card">
+    <h2>Kits</h2><p class="fine">Which kits people look at and order</p>
+    ${a.kits.length ? `<div class="an-scroll"><table class="an-kits"><thead><tr><th>Kit</th><th>Views</th><th>People</th><th>Added to cart</th><th>Kits ordered</th></tr></thead>
+      <tbody>${a.kits.map(k => `<tr><td>${esc(k.name)}</td><td>${n0(k.views)}</td><td>${n0(k.people)}</td><td>${n0(k.adds)}</td><td>${n0(k.sold)}</td></tr>`).join("")}</tbody></table></div>`
+      : `<p class="fine">No kit views yet.</p>`}
+  </div>`;
+  const sources = `<div class="an-card"><h2>Where visitors come from</h2><p class="fine">The website or link that sent each visit</p>
+    ${barList(a.sources, r => r.name === "Direct" ? "Direct (typed the address, a saved link, or a text/WhatsApp message)" : r.name, "No visits yet.")}</div>`;
+  const devices = `<div class="an-card"><h2>Devices</h2><p class="fine">What people used to open the shop</p>${barList(a.devices, r => r.name, "No visits yet.")}</div>`;
+  const pages = `<div class="an-card"><h2>Most opened pages</h2><p class="fine">Page views by page</p>${barList(a.pages, r => PAGE_NAMES[r.name] || r.name, "No page views yet.")}</div>`;
+  const hmap = Object.fromEntries(a.hours.map(h => [h.h, h.n])), hmax = Math.max(1, ...Object.values(hmap));
+  const hourName = h => new Date(2000, 0, 1, h).toLocaleTimeString([], { hour: "numeric" });
+  const hours = `<div class="an-card"><h2>Busiest times of day</h2><p class="fine">Visits by hour, in your time zone</p>
+    <div class="an-hours">${Array.from({ length: 24 }, (_, h) => `<div class="an-col" tabindex="0" aria-label="${hourName(h)}: ${hmap[h] || 0} visits">
+      <i style="height:${hmap[h] ? Math.max(3, hmap[h] / hmax * 100) : 0}%"></i><span class="an-tip"><b>${hourName(h)}</b>${n0(hmap[h])} visits</span></div>`).join("")}</div>
+    <div class="an-xaxis an-hx"><span>12am</span><span>6am</span><span>12pm</span><span>6pm</span><span>11pm</span></div></div>`;
+
+  const live = `<div class="an-live"><span class="dot ${a.live ? "on" : ""}"></span>${a.live ? `${a.live === 1 ? "1 person is" : n0(a.live) + " people are"} on the shop right now` : "Nobody on the shop right now"}</div>`;
+  const note = `<p class="fine an-note">Counting started ${a.since ? new Date(a.since).toLocaleDateString([], { dateStyle: "medium" }) : "now, so numbers will appear once people visit"}. Visitors are counted anonymously (no names or addresses). Search engine robots, and your own visits while you’re signed in to the admin, aren’t counted. Order and message totals come from your Orders and Messages tabs.</p>`;
+  return head + live + tiles + chart + `<div class="an-grid">${funnel}${sources}${kits}${devices}${hours}${pages}</div>` + note;
+}
+
 /* ================= routing & events ================= */
 const route = () => decodeURIComponent(location.hash.replace(/^#/, ""));
 function render(keepScroll) {
@@ -691,6 +813,7 @@ function render(keepScroll) {
     applyTheme(store.season.theme);
     if (r.startsWith("kit-") && findP(r.slice(4))) updateProduct(r.slice(4));
     if (r === "checkout") updateZipNote();
+    if (ui.tracked !== r) { ui.tracked = r; track("pageview", pageName(r)); }
   } else if (admin.data) {
     applyTheme(admin.sdraft && admin.tab === "season" ? admin.sdraft.theme : admin.data.season.theme);
     if (admin.draft) updatePreview();
@@ -701,7 +824,7 @@ function render(keepScroll) {
 }
 function go(h) { if (route() === h) render(); else location.hash = h; }
 function focusSearch(pos) { const i = document.querySelector("[data-search]"); if (!i) return; i.focus(); const p = pos ?? i.value.length; try { i.setSelectionRange(p, p); } catch (e) {} }
-window.addEventListener("hashchange", () => { ui.contactSent = null; document.getElementById("toast").classList.remove("show"); if (!IS_ADMIN) render(); });
+window.addEventListener("hashchange", () => { ui.tracked = null; ui.contactSent = null; document.getElementById("toast").classList.remove("show"); if (!IS_ADMIN) render(); });
 
 document.addEventListener("click", async e => {
   const t = e.target.closest("button, a"); if (!t) return;
@@ -721,7 +844,9 @@ document.addEventListener("click", async e => {
 
   /* admin */
   if ("signout" in ds) { try { await api("POST", "/api/admin/logout"); } catch (err) {} admin.authed = false; admin.data = null; admin.loginError = ""; render(); return; }
-  if (ds.tab) { admin.tab = ds.tab; admin.sdraft = null; admin.ddraft = null; render(true); return; }
+  if (ds.tab) { admin.tab = ds.tab; admin.sdraft = null; admin.ddraft = null; render(true); if (ds.tab === "analytics") loadAnalytics(); return; }
+  if (ds.range) { admin.anRange = ds.range; loadAnalytics(); return; }
+  if ("anRefresh" in ds) { loadAnalytics(); return; }
   if ("new" in ds) { admin.draft = { id: null, name: "", blurb: "", included: [], price: 0, bulkMin: 10, bulkPct: 10, visible: true, photo: "" }; admin.deleteArmed = false; render(); return; }
   if (ds.edit) { admin.draft = structuredClone(admin.data.products.find(p => p.id === ds.edit)); admin.deleteArmed = false; render(); return; }
   if ("cancel" in ds) { admin.draft = null; render(); return; }

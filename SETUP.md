@@ -210,3 +210,7 @@ Your `.env` and `data` folder aren't in GitHub, so they're never overwritten.
 **See errors:** `cd ~/paint-party-kits && docker compose logs --tail 100`
 
 **Restart:** `cd ~/paint-party-kits && docker compose restart`
+
+**Analytics:** the admin's **Analytics** tab shows how many people visited the shop, page views, which kits they looked at, where visitors came from (Google, Instagram, etc.), phones vs. computers, busiest hours, and how many added to cart, sent an order request or a message. Counting is anonymous and starts from the day this update is installed. Your own visits while signed in to the admin aren't counted.
+
+**Tip:** when you share the shop link somewhere, add `?utm_source=` and a name so Analytics shows exactly where visitors came from, for example `https://mypaintpartykits.com/?utm_source=whatsapp` or `?utm_source=flyer`.

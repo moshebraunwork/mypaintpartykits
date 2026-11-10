@@ -32,6 +32,11 @@ CREATE TABLE IF NOT EXISTS products (
 CREATE TABLE IF NOT EXISTS orders (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, status TEXT NOT NULL, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, status TEXT NOT NULL, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, visitor TEXT NOT NULL, visit TEXT NOT NULL,
+  type TEXT NOT NULL, page TEXT NOT NULL DEFAULT '', product TEXT NOT NULL DEFAULT '',
+  source TEXT NOT NULL DEFAULT '', device TEXT NOT NULL DEFAULT '');
+CREATE INDEX IF NOT EXISTS events_at ON events(at);
 `);
 const getSetting = (k, fallback) => { const r = db.prepare("SELECT value FROM settings WHERE key=?").get(k); return r ? JSON.parse(r.value) : fallback; };
 const setSetting = (k, v) => db.prepare("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(k, JSON.stringify(v));
@@ -198,6 +203,7 @@ app.post("/api/orders", limit("order", 10, 15 * 60e3), (req, res) => {
     db.prepare("INSERT INTO orders(id,created_at,status,data) VALUES(?,?,?,?)").run(order.id, order.created_at, order.status, JSON.stringify(order));
   });
   save();
+  track(req, { ...(req.body.analytics || {}), type: "order" });
   res.json({ order, email: orderEmail(order) });
 });
 
@@ -214,9 +220,42 @@ app.post("/api/messages", limit("message", 8, 15 * 60e3), (req, res) => {
   m.id = "M" + Date.now().toString(36) + crypto.randomBytes(2).toString("hex");
   m.created_at = new Date().toISOString(); m.status = "New";
   db.prepare("INSERT INTO messages(id,created_at,status,data) VALUES(?,?,?,?)").run(m.id, m.created_at, m.status, JSON.stringify(m));
+  track(req, { ...(b.analytics || {}), type: "message" });
   res.json({ message: m, email: { subject: `New message: ${m.topic}`,
     text: `New message from the website\n\nTopic: ${m.topic}\nName: ${m.name}\nPhone: ${m.phone}\nEmail: ${m.email}\n\n${m.message}` } });
 });
+
+/* ----- visitor analytics (anonymous: a random browser id, no names, emails or IP addresses) ----- */
+const EVENT_TYPES = ["pageview", "add_to_cart", "order", "message"];
+const BOT_UA = /bot|crawl|spider|slurp|preview|facebookexternalhit|headless|lighthouse|monitor|curl|wget|python|node-fetch|axios/i;
+const deviceOf = ua => /ipad|tablet|kindle|playbook|silk|(android(?!.*mobile))/i.test(ua) ? "Tablet" : /mobi|iphone|ipod|android/i.test(ua) ? "Phone" : "Computer";
+const anonId = v => (typeof v === "string" && /^[a-z0-9]{8,40}$/i.test(v)) ? v : "";
+function sourceOf(ref, utm, host) {
+  const u = str(utm, 60).toLowerCase();
+  if (u) return u.replace(/[^a-z0-9 ._-]/g, "").slice(0, 60) || "Direct";
+  try {
+    const h = new URL(ref).hostname.replace(/^www\./, "").toLowerCase();
+    if (!h || h === String(host || "").replace(/^www\./, "").toLowerCase()) return "Direct";
+    return h.slice(0, 80);
+  } catch (e) { return "Direct"; }
+}
+const insertEvent = db.prepare("INSERT INTO events(at,visitor,visit,type,page,product,source,device) VALUES(?,?,?,?,?,?,?,?)");
+function track(req, e) {
+  const ua = String(req.get("user-agent") || "");
+  if (!ua || BOT_UA.test(ua)) return;
+  if (req.session && req.session.admin) return; // the owner browsing the shop doesn't count
+  const visitor = anonId(e.visitor), visit = anonId(e.visit);
+  if (!visitor || !visit || !EVENT_TYPES.includes(e.type)) return;
+  insertEvent.run(new Date().toISOString(), visitor, visit, e.type, str(e.page, 60), str(e.product, 60),
+    e.type === "pageview" ? sourceOf(str(e.ref, 300), e.utm, req.hostname) : "", deviceOf(ua));
+}
+app.post("/api/track", limit("track", 240, 15 * 60e3), (req, res) => {
+  const b = req.body || {};
+  if (b.type === "order" || b.type === "message") return res.status(204).end(); // recorded by the server itself
+  track(req, b);
+  res.status(204).end();
+});
+setInterval(() => db.prepare("DELETE FROM events WHERE at < ?").run(new Date(Date.now() - 400 * 864e5).toISOString()), 24 * 3600e3).unref();
 
 /* ----- owner API ----- */
 const sha = s => crypto.createHash("sha256").update(String(s)).digest();
@@ -237,6 +276,69 @@ app.get("/api/admin/all", requireAdmin, (req, res) => {
   const rows = t => db.prepare(`SELECT data, status FROM ${t} ORDER BY created_at DESC LIMIT 500`).all().map(r => ({ ...JSON.parse(r.data), status: r.status }));
   res.json({ products: allProducts(), orders: rows("orders"), messages: rows("messages"),
     season: getSetting("season", {}), delivery: getSetting("delivery", {}) });
+});
+
+app.get("/api/admin/analytics", requireAdmin, (req, res) => {
+  const RANGES = { today: 0, "7": 7, "30": 30, "90": 90, all: null };
+  const range = Object.hasOwn(RANGES, req.query.range) ? req.query.range : "30";
+  const tz = Math.max(-840, Math.min(840, Math.round(num(req.query.tz) || 0))); // browser's offset from UTC, minutes
+  const shift = `${tz >= 0 ? "+" : ""}${tz} minutes`;
+  const localDay = d => new Date(d.getTime() + tz * 60e3).toISOString().slice(0, 10);
+  const today = localDay(new Date());
+  let from = "";
+  if (range !== "all") {
+    const start = new Date(Date.parse(today + "T00:00:00Z") - RANGES[range] * 864e5 + (RANGES[range] ? 864e5 : 0));
+    from = new Date(start.getTime() - tz * 60e3).toISOString(); // local midnight, as UTC
+  }
+  const q = (sql, ...a) => db.prepare(sql).all(from, ...a);
+  const one = (sql, ...a) => db.prepare(sql).get(from, ...a);
+  const W = "at >= ?";
+  const totals = one(`SELECT COUNT(DISTINCT visitor) visitors, COUNT(DISTINCT visit) visits,
+      SUM(type='pageview') pageviews, SUM(type='add_to_cart') adds,
+      COUNT(DISTINCT CASE WHEN type='pageview' AND page='checkout' THEN visit END) checkouts FROM events WHERE ${W}`);
+  const returning = one(`SELECT COUNT(*) n FROM (SELECT visitor FROM events WHERE ${W} GROUP BY visitor HAVING COUNT(DISTINCT visit) > 1)`).n;
+  const funnel = one(`SELECT COUNT(DISTINCT visit) visits,
+      COUNT(DISTINCT CASE WHEN type='pageview' AND page='kit' THEN visit END) viewedKit,
+      COUNT(DISTINCT CASE WHEN type='add_to_cart' THEN visit END) added,
+      COUNT(DISTINCT CASE WHEN type='pageview' AND page='checkout' THEN visit END) checkout,
+      COUNT(DISTINCT CASE WHEN type='order' THEN visit END) ordered FROM events WHERE ${W}`);
+  const fromOr = from || "0";
+  const orders = db.prepare("SELECT data FROM orders WHERE created_at >= ?").all(fromOr).map(r => JSON.parse(r.data));
+  const messages = db.prepare("SELECT COUNT(*) n FROM messages WHERE created_at >= ?").get(fromOr).n;
+  const daily = q(`SELECT date(at, '${shift}') day, COUNT(DISTINCT visitor) visitors, SUM(type='pageview') views
+      FROM events WHERE ${W} GROUP BY day ORDER BY day`);
+  const dayOrders = {}, dayMsgs = {};
+  for (const o of orders) { const d = localDay(new Date(o.created_at)); dayOrders[d] = (dayOrders[d] || 0) + 1; }
+  for (const r of db.prepare("SELECT created_at FROM messages WHERE created_at >= ?").all(fromOr)) { const d = localDay(new Date(r.created_at)); dayMsgs[d] = (dayMsgs[d] || 0) + 1; }
+  // fill every day in the range so quiet days show as zero
+  const byDay = Object.fromEntries(daily.map(r => [r.day, r]));
+  const first = from ? localDay(new Date(from)) : [daily[0] && daily[0].day, ...Object.keys(dayOrders), ...Object.keys(dayMsgs)].filter(Boolean).sort()[0] || today;
+  const days = [];
+  for (let t = Date.parse(first + "T00:00:00Z"); t <= Date.parse(today + "T00:00:00Z") && days.length < 800; t += 864e5) {
+    const d = new Date(t).toISOString().slice(0, 10), r = byDay[d] || {};
+    days.push({ day: d, visitors: r.visitors || 0, views: r.views || 0, orders: dayOrders[d] || 0, messages: dayMsgs[d] || 0 });
+  }
+  const names = Object.fromEntries(allProducts().map(p => [p.id, p.name]));
+  const kits = q(`SELECT product id, SUM(type='pageview') views, SUM(type='add_to_cart') adds, COUNT(DISTINCT CASE WHEN type='pageview' THEN visitor END) people
+      FROM events WHERE ${W} AND product != '' GROUP BY product ORDER BY views DESC LIMIT 20`)
+    .map(k => ({ ...k, name: names[k.id] || k.id + " (deleted)" }));
+  const sold = {};
+  for (const o of orders) for (const i of o.items) sold[i.id] = (sold[i.id] || 0) + i.qty;
+  for (const k of kits) k.sold = sold[k.id] || 0;
+  const firstSource = `SELECT visit, source FROM events WHERE ${W} AND type='pageview' AND id IN (SELECT MIN(id) FROM events WHERE ${W} AND type='pageview' GROUP BY visit)`;
+  const sources = db.prepare(`SELECT source name, COUNT(*) n FROM (${firstSource}) GROUP BY source ORDER BY n DESC LIMIT 12`).all(from, from);
+  const devices = q(`SELECT device name, COUNT(DISTINCT visitor) n FROM events WHERE ${W} GROUP BY device ORDER BY n DESC`);
+  const pages = q(`SELECT page name, COUNT(*) n FROM events WHERE ${W} AND type='pageview' GROUP BY page ORDER BY n DESC LIMIT 10`);
+  const hours = q(`SELECT CAST(strftime('%H', at, '${shift}') AS INTEGER) h, COUNT(DISTINCT visit) n FROM events WHERE ${W} GROUP BY h`);
+  const live = db.prepare("SELECT COUNT(DISTINCT visitor) n FROM events WHERE at >= ?").get(new Date(Date.now() - 5 * 60e3).toISOString()).n;
+  const firstEvent = db.prepare("SELECT MIN(at) at FROM events").get().at;
+  res.json({
+    range, live, since: firstEvent,
+    totals: { visitors: totals.visitors || 0, visits: totals.visits || 0, pageviews: totals.pageviews || 0, adds: totals.adds || 0,
+      checkouts: totals.checkouts || 0, orders: orders.length, messages, returning,
+      revenue: r2(orders.reduce((s, o) => s + (o.total || 0), 0)), kitsOrdered: orders.reduce((s, o) => s + o.items.reduce((a, i) => a + i.qty, 0), 0) },
+    funnel, days, kits, sources, devices, pages, hours
+  });
 });
 
 const slug = s => (s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "kit");
