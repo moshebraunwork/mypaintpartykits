@@ -163,7 +163,7 @@ Open **https://mypaintpartykits.com**. You should see the shop with a padlock.
 Go to **https://mypaintpartykits.com/admin** and sign in with `sales@mypaintpartykits.com` and the password from step 3.
 
 1. **Delivery** tab: enter your home ZIP, adjust the distances and prices, tap **Generate ZIP list**, review the list, then tap **Save delivery settings**. Until this is saved, customers only see pickup.
-2. **Products** tab: check the Chanukah kit's price and discount.
+2. **Items** tab: check the Chanukah kit's price and discount. When editing an item you can add up to 10 photos (the first is the main one) and options such as Color or Size. If an option has more than one choice, customers must pick one before adding to cart, and their choice shows in the order, the email and the Orders tab. Each choice can have its own price: type an amount to add (like 3 for +$3) or take off (like -1); the editor shows what customers will pay for each choice. The bulk discount counts all options of an item together.
 3. **Seasonal look** tab: adjust the banner if you like.
 
 ---
@@ -210,3 +210,7 @@ Your `.env` and `data` folder aren't in GitHub, so they're never overwritten.
 **See errors:** `cd ~/paint-party-kits && docker compose logs --tail 100`
 
 **Restart:** `cd ~/paint-party-kits && docker compose restart`
+
+**Analytics:** the admin's **Analytics** tab shows how many people visited the shop, page views, which kits they looked at, where visitors came from (Google, Instagram, etc.), phones vs. computers, busiest hours, and how many added to cart, sent an order request or a message. Counting is anonymous and starts from the day this update is installed. Your own visits while signed in to the admin aren't counted.
+
+**Tip:** when you share the shop link somewhere, add `?utm_source=` and a name so Analytics shows exactly where visitors came from, for example `https://mypaintpartykits.com/?utm_source=whatsapp` or `?utm_source=flyer`.

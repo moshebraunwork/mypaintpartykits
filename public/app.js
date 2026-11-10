@@ -17,7 +17,9 @@ let store = null;                       // public store data from the server
 let cart = loadCart();
 const ui = { query: "", searchOpen: false, wantSearchFocus: false, qty: {}, method: "pickup", lastOrder: null,
   contactSent: null, zipQuote: null, zipFor: "", busy: false };
-const admin = { authed: false, data: null, tab: "products", draft: null, sdraft: null, ddraft: null, deleteArmed: false, busy: false, loginError: "" };
+const admin = { authed: false, data: null, tab: "products", draft: null, sdraft: null, ddraft: null, deleteArmed: false, busy: false, loginError: "",
+  an: null, anRange: "30", anLoading: false };
+ui.sel = {}; ui.photo = {};
 
 /* ---------------- helpers ---------------- */
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -26,8 +28,35 @@ const money = n => "$" + r2(n).toFixed(2);
 const hasBulk = p => p.bulkMin > 1 && p.bulkPct > 0;
 const bulkUnit = p => r2(p.price * (1 - p.bulkPct / 100));
 const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
-function priceFor(p, q) { const bulk = hasBulk(p) && q >= p.bulkMin, unit = bulk ? bulkUnit(p) : p.price; return { bulk, unit, total: r2(unit * q), full: r2(p.price * q) }; }
+// bulkQty: all of this item in the cart (any options); extra: price change from the chosen options
+function priceFor(p, q, bulkQty = q, extra = 0) {
+  const each = r2(p.price + extra), bulk = hasBulk(p) && bulkQty >= p.bulkMin, unit = bulk ? r2(each * (1 - p.bulkPct / 100)) : each;
+  return { bulk, unit, total: r2(unit * q), full: r2(each * q) };
+}
+const exOf = (g, v) => (g.extras && g.extras[g.values.indexOf(v)]) || 0;
+// price change for a (possibly partial) choice; an unchosen option counts at its cheapest choice
+const extraFor = (p, sel) => (p.options || []).reduce((s, g) => s + (sel && g.values.includes(sel[g.name]) ? exOf(g, sel[g.name]) : Math.min(...g.values.map(v => exOf(g, v)))), 0);
+function priceRange(p) {
+  let lo = p.price, hi = p.price;
+  for (const g of p.options || []) { const ex = g.values.map(v => exOf(g, v)); if (!ex.length) continue; lo += Math.min(...ex); hi += Math.max(...ex); }
+  return { lo: r2(lo), hi: r2(hi) };
+}
+const signed = n => (n < 0 ? "−" : "+") + money(Math.abs(n));
 const findP = id => store && store.products.find(p => p.id === id);
+const photosOf = p => (p.photos && p.photos.length ? p.photos : p.photo ? [p.photo] : []);
+/* options: [{ name: "Color", values: ["Red", "Blue"] }]. A group with one value is chosen automatically. */
+const needsChoice = p => (p.options || []).some(g => g.values.length > 1);
+function fullOpts(p, sel) { // the complete choice in the item's option order, or null if something isn't chosen yet
+  const o = {};
+  for (const g of p.options || []) {
+    const v = g.values.length === 1 ? g.values[0] : (sel && g.values.includes(sel[g.name]) ? sel[g.name] : null);
+    if (!v) return null; o[g.name] = v;
+  }
+  return o;
+}
+const optLine = opts => Object.entries(opts || {}).map(([k, v]) => `${k}: ${v}`).join(" · ");
+const lineKey = l => l.id + "|" + JSON.stringify(l.opts || {});
+const itemRoute = r => r.startsWith("item-") ? r.slice(5) : r.startsWith("kit-") ? r.slice(4) : null; // old "kit-" links keep working
 const REQ = `<span class="req" aria-hidden="true">*</span>`;
 const REQ_NOTE = `<p class="fine" style="margin-top:-6px">Fields marked <span class="req" style="margin:0">*</span> are required.</p>`;
 
@@ -40,6 +69,37 @@ async function api(method, url, body) {
   catch (e) { const err = new Error("We couldn’t reach the website. Check your connection and try again."); err.status = 0; throw err; }
   if (!res.ok) { const err = new Error(json.error || "Something went wrong. Please try again."); err.status = res.status; err.errors = json.errors || {}; throw err; }
   return json;
+}
+/* ---------------- anonymous visit counting (shown only in the owner's Analytics tab) ---------------- */
+const rid = () => Array.from(crypto.getRandomValues(new Uint8Array(12)), b => b.toString(36).padStart(2, "0")).join("").slice(0, 20);
+function analyticsIds() {
+  let visitor = "", visit = "", now = Date.now();
+  try {
+    visitor = localStorage.getItem("ppk-vid") || "";
+    if (!/^[a-z0-9]{8,40}$/.test(visitor)) { visitor = rid(); localStorage.setItem("ppk-vid", visitor); }
+  } catch (e) { visitor = visitor || (window.__ppkVid ||= rid()); }
+  try {
+    const v = JSON.parse(sessionStorage.getItem("ppk-visit") || "null");
+    visit = v && now - v.last < 30 * 60e3 ? v.id : "";              // a visit ends after 30 quiet minutes
+    if (!visit) visit = rid();
+    sessionStorage.setItem("ppk-visit", JSON.stringify({ id: visit, last: now }));
+  } catch (e) { visit = window.__ppkVisit ||= rid(); }
+  return { visitor, visit };
+}
+let firstView = true;
+function track(type, extra) {
+  if (IS_ADMIN) return;
+  const body = { ...analyticsIds(), type, ...extra };
+  if (type === "pageview" && firstView) {
+    firstView = false;
+    body.ref = document.referrer;
+    try { body.utm = new URLSearchParams(location.search).get("utm_source") || ""; } catch (e) {}
+  }
+  fetch("/api/track", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), keepalive: true, credentials: "same-origin" }).catch(() => {});
+}
+function pageName(r) {
+  if (itemRoute(r)) return { page: "kit", product: itemRoute(r) };
+  return { page: ["cart", "checkout", "order-sent", "contact"].includes(r) ? r : "home" };
 }
 function loadCart() { try { const c = JSON.parse(localStorage.getItem(CART_KEY) || "[]"); return Array.isArray(c) ? c : []; } catch (e) { return []; } }
 function saveCart() { try { localStorage.setItem(CART_KEY, JSON.stringify(cart)); } catch (e) {} }
@@ -100,30 +160,36 @@ const CLOSE_ICON = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" 
 const CHECK = `<svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>`;
 
 /* ---------------- cart ---------------- */
-function cartLines() { return cart.map(l => ({ ...l, p: findP(l.id) })).filter(l => l.p); }
+function cartLines() {
+  const lines = cart.map(l => ({ ...l, key: lineKey(l), p: findP(l.id) })).filter(l => l.p), per = {};
+  lines.forEach(l => per[l.id] = (per[l.id] || 0) + l.qty);
+  lines.forEach(l => l.bulkQty = per[l.id]); // bulk discount counts every color/size of the same item together
+  return lines;
+}
 function cartCount() { return cartLines().reduce((s, l) => s + l.qty, 0); }
 function cartTotals() {
   let full = 0, total = 0;
-  cartLines().forEach(l => { const r = priceFor(l.p, l.qty); full += r.full; total += r.total; });
+  cartLines().forEach(l => { const r = priceFor(l.p, l.qty, l.bulkQty, extraFor(l.p, l.opts)); full += r.full; total += r.total; });
   return { full: r2(full), total: r2(total), save: r2(full - total) };
 }
 function nudgeText(p, q) {
   if (!hasBulk(p)) return null;
-  if (q >= p.bulkMin) return { won: true, text: `Bulk price unlocked: ${p.bulkPct}% off every kit` };
-  const left = p.bulkMin - q; return { won: false, text: `Add ${plural(left, "more kit")} to get ${p.bulkPct}% off every kit` };
+  const any = needsChoice(p) ? " (any mix of options)" : "";
+  if (q >= p.bulkMin) return { won: true, text: `Bulk price unlocked: ${p.bulkPct}% off each one` };
+  const left = p.bulkMin - q; return { won: false, text: `Add ${left} more${any} to get ${p.bulkPct}% off each one` };
 }
-function addToCart(id, qty) {
-  const l = cart.find(x => x.id === id);
-  if (l) l.qty = Math.min(999, l.qty + qty); else cart.push({ id, qty });
-  saveCart();
+function addToCart(id, qty, opts) {
+  const key = lineKey({ id, opts }), l = cart.find(x => lineKey(x) === key);
+  if (l) l.qty = Math.min(999, l.qty + qty); else cart.push({ id, qty, opts });
+  saveCart(); track("add_to_cart", { product: id });
   const btn = document.getElementById("cartBtn");
   if (btn) { btn.querySelector(".cart-count").textContent = cartCount(); btn.classList.remove("bump"); void btn.offsetWidth; btn.classList.add("bump"); }
-  toast(qty === 1 ? "Added to cart" : `${qty} kits added to cart`, { go: "cart", label: "View cart" });
+  toast(qty === 1 ? "Added to cart" : `${qty} added to cart`, { go: "cart", label: "View cart" });
 }
 function setQty(ctx, id, q) {
   q = Math.max(1, Math.min(999, q));
   if (ctx === "pq") { ui.qty[id] = q; updateProduct(id); return q; }
-  const l = cart.find(x => x.id === id); if (l) { l.qty = q; saveCart(); render(true); }
+  const l = cart.find(x => lineKey(x) === id); if (l) { l.qty = q; saveCart(); render(true); }
   return q;
 }
 
@@ -135,12 +201,12 @@ function topbar() {
       <button class="logo" data-go="">${MARK}<span class="logo-name">Paint Party Kits</span></button>
       <div class="top-actions">
         <a class="nav-link" href="#contact">Contact</a>
-        <button class="icon-btn" data-search-toggle aria-label="Search kits" aria-expanded="${open}">${SEARCH_ICON}</button>
+        <button class="icon-btn" data-search-toggle aria-label="Search" aria-expanded="${open}">${SEARCH_ICON}</button>
         <button class="cart-btn" id="cartBtn" data-go="cart" aria-label="Cart, ${plural(n, "item")}">${CART_ICON}<span class="txt">Cart</span><span class="cart-count">${n}</span></button>
       </div>
     </div>
     ${open ? `<div class="search-panel"><div class="wrap">
-      <label class="search">${SEARCH_ICON}<input type="search" data-search placeholder="Search kits" value="${esc(ui.query)}" aria-label="Search kits" enterkeyhint="search"></label>
+      <label class="search">${SEARCH_ICON}<input type="search" data-search placeholder="Search" value="${esc(ui.query)}" aria-label="Search" enterkeyhint="search"></label>
       <button class="icon-btn" data-search-close aria-label="Close search">${CLOSE_ICON}</button>
     </div></div>` : ""}
   </header>`;
@@ -156,7 +222,7 @@ const shell = inner => topbar() + `<main>${inner}</main>` + footer();
 /* ---------------- home ---------------- */
 function bannerHTML(s, preview) {
   const p = s.link && findP(s.link);
-  const target = preview ? `tabindex="-1"` : (p ? `data-go="kit-${esc(p.id)}"` : `data-scroll="lh"`);
+  const target = preview ? `tabindex="-1"` : (p ? `data-go="item-${esc(p.id)}"` : `data-scroll="lh"`);
   return `<div class="banner">
     <div class="banner-text">
       <h1>${esc(s.headline || "Your headline")}</h1>
@@ -173,22 +239,25 @@ function viewHome() {
   return shell(`
   ${q || !s.show ? "" : `<section class="banner-sec"><div class="wrap">${bannerHTML(s)}</div></section>`}
   <section class="wrap" aria-labelledby="lh">
-    <div class="list-head"><h2 id="lh">${q ? `Results for “${esc(ui.query.trim())}”` : "All kits"}</h2><span>${plural(list.length, "kit")}</span></div>
+    <div class="list-head"><h2 id="lh">${q ? `Results for “${esc(ui.query.trim())}”` : "All items"}</h2><span>${plural(list.length, "item")}</span></div>
     ${list.length ? `<div class="grid">${list.map(p => card(p)).join("")}</div>`
-      : q ? `<div class="empty-state"><h2>No kits match that search</h2><p>Try another word, or see everything we have.</p><button class="btn" data-clear-search>Show all kits</button></div>`
-          : `<div class="empty-state"><h2>New kits are on the way</h2><p>Check back soon, or contact us with a question.</p><a class="btn" href="#contact">Contact us</a></div>`}
+      : q ? `<div class="empty-state"><h2>Nothing matches that search</h2><p>Try another word, or see everything we have.</p><button class="btn" data-clear-search>Show all items</button></div>`
+          : `<div class="empty-state"><h2>New items are on the way</h2><p>Check back soon, or contact us with a question.</p><a class="btn" href="#contact">Contact us</a></div>`}
   </section>`);
 }
 function card(p, preview) {
-  const go = preview ? `tabindex="-1"` : `data-go="kit-${esc(p.id)}"`;
+  const go = preview ? `tabindex="-1"` : `data-go="item-${esc(p.id)}"`, ph = photosOf(p)[0], choose = needsChoice(p);
+  const optHint = (p.options || []).filter(g => g.values.length > 1).map(g => `${g.values.length} ${esc(g.name.toLowerCase())} choices`).join(" · ");
   return `<article class="card">
-    <button class="ph" ${go} aria-label="View ${esc(p.name)}">${p.photo ? `<img src="${esc(p.photo)}" alt="" loading="lazy">` : ""}</button>
+    <button class="ph" ${go} aria-label="View ${esc(p.name)}">${ph ? `<img src="${esc(ph)}" alt="" loading="lazy">` : ""}</button>
     <div class="body">
       <h3><button ${go}>${esc(p.name)}</button></h3>
-      <div class="price">${money(p.price)} <small>each</small></div>
+      <div class="price">${(pr => pr.lo < pr.hi ? `<small>From</small> ${money(pr.lo)}` : `${money(pr.lo)} <small>each</small>`)(priceRange(p))}</div>
       ${hasBulk(p) ? `<span class="deal">${p.bulkPct}% off ${p.bulkMin}+</span>` : ""}
+      ${optHint ? `<span class="opt-hint">${optHint}</span>` : ""}
       <div style="height:6px"></div>
-      <button class="btn soft block add" ${preview ? `tabindex="-1"` : `data-add="${esc(p.id)}"`}>Add to cart</button>
+      ${choose ? `<button class="btn soft block add" ${go}>Choose options</button>`
+        : `<button class="btn soft block add" ${preview ? `tabindex="-1"` : `data-add="${esc(p.id)}"`}>Add to cart</button>`}
     </div></article>`;
 }
 
@@ -201,19 +270,31 @@ function stepper(ctx, q, id, sm) {
 }
 function viewProduct(id) {
   const p = findP(id);
-  if (!p) return shell(`<div class="wrap"><div class="empty-state" style="margin-top:30px"><h2>This kit isn’t available</h2><p>It may have sold out or been removed.</p><button class="btn" data-go="">See all kits</button></div></div>`);
-  const q = ui.qty[id] || 1;
+  if (!p) return shell(`<div class="wrap"><div class="empty-state" style="margin-top:30px"><h2>This item isn’t available</h2><p>It may have sold out or been removed.</p><button class="btn" data-go="">See all items</button></div></div>`);
+  const q = ui.qty[id] || 1, photos = photosOf(p), pi = Math.min(ui.photo[id] || 0, Math.max(0, photos.length - 1)), sel = ui.sel[id] || {};
+  const groups = (p.options || []).map((g, gi) => {
+    const one = g.values.length === 1, chosen = one ? g.values[0] : sel[g.name];
+    const tag = v => exOf(g, v) ? ` <small>${signed(exOf(g, v))}</small>` : "";
+    return `<fieldset class="opt-group">
+      <legend class="label">${esc(g.name)}${one ? "" : `${REQ}<span class="opt-chosen">${chosen ? esc(chosen) : "Choose one"}</span>`}</legend>
+      <div class="opt-vals">${g.values.map(v => `<label class="opt-val"><input type="radio" name="og-${gi}" value="${esc(v)}" data-opt-group="${esc(g.name)}" data-pid="${esc(p.id)}" ${chosen === v ? "checked" : ""}><span>${esc(v)}${tag(v)}</span></label>`).join("")}</div>
+      <span class="err" data-opt-err="${esc(g.name)}"></span></fieldset>`;
+  }).join("");
   return shell(`<div class="wrap">
-    <button class="back" data-go="">‹ All kits</button>
+    <button class="back" data-go="">‹ All items</button>
     <div class="product">
-      <div class="ph">${p.photo ? `<img src="${esc(p.photo)}" alt="${esc(p.name)}">` : ""}</div>
+      <div class="gallery">
+        <div class="ph">${photos.length ? `<img id="mainPhoto" src="${esc(photos[pi])}" alt="${esc(p.name)}">` : ""}</div>
+        ${photos.length > 1 ? `<div class="thumbs">${photos.map((u, i) => `<button class="thumb" data-photo="${i}" data-pid="${esc(p.id)}" aria-label="Photo ${i + 1} of ${photos.length}" aria-pressed="${i === pi}"><img src="${esc(u)}" alt="" loading="lazy"></button>`).join("")}</div>` : ""}
+      </div>
       <div>
         <h1>${esc(p.name)}</h1>
         <p class="lede">${esc(p.blurb)}</p>
-        <div class="big-price">${money(p.price)} <small>each</small></div>
-        ${hasBulk(p) ? `<p class="bulk-line">Buy ${p.bulkMin} or more and pay ${money(bulkUnit(p))} each (${p.bulkPct}% off).</p>` : `<div style="height:20px"></div>`}
-        ${p.included.length ? `<span class="label">In each kit</span><ul class="incl">${p.included.map(i => `<li>${esc(i)}</li>`).join("")}</ul>` : ""}
+        <div class="big-price" id="bigPrice"></div>
+        ${hasBulk(p) ? `<p class="bulk-line">${priceRange(p).lo < priceRange(p).hi ? `Buy ${p.bulkMin} or more (any mix of options) and save ${p.bulkPct}% on each one.` : `Buy ${p.bulkMin} or more and pay ${money(bulkUnit({ ...p, price: priceRange(p).lo }))} each (${p.bulkPct}% off).`}</p>` : `<div style="height:20px"></div>`}
+        ${p.included.length ? `<span class="label">What’s included</span><ul class="incl">${p.included.map(i => `<li>${esc(i)}</li>`).join("")}</ul>` : ""}
         <div class="buy">
+          ${groups}
           <div class="buy-row">
             <div><span class="label">Quantity</span>${stepper("pq", q, id)}</div>
             <div class="line-total" id="plt"></div>
@@ -226,7 +307,10 @@ function viewProduct(id) {
 }
 function updateProduct(id) {
   const p = findP(id); if (!p) return;
-  const q = ui.qty[id] || 1, r = priceFor(p, q), n = nudgeText(p, q);
+  const q = ui.qty[id] || 1, inCart = cart.filter(l => l.id === id).reduce((s, l) => s + l.qty, 0);
+  const sel = ui.sel[id], ext = extraFor(p, sel), pr = priceRange(p);
+  const r = priceFor(p, q, q + inCart, ext), n = nudgeText(p, q + inCart);
+  document.getElementById("bigPrice").innerHTML = (!fullOpts(p, sel) && pr.lo < pr.hi ? `<small>From</small> ` : "") + `${money(p.price + ext)} <small>each</small>`;
   document.getElementById("plt").innerHTML = (r.bulk ? `<s>${money(r.full)}</s>` : "") + `<b>${money(r.total)}</b>`;
   const el = document.getElementById("pn");
   if (n) { el.hidden = false; el.className = "nudge" + (n.won ? " won" : ""); el.textContent = n.text; } else el.hidden = true;
@@ -238,21 +322,22 @@ function viewCart() {
   const back = `<button class="back" data-go="">‹ Continue shopping</button><h1 class="page-title" style="margin-top:4px">Your cart</h1>`;
   if (!lines.length) return shell(`<div class="wrap">${back}
     <div class="empty-state"><div style="color:var(--brand);display:flex;justify-content:center">${CART_ICON.replace('width="20" height="20"', 'width="44" height="44"')}</div>
-    <h2>Your cart is empty</h2><p>Add a kit or two and they’ll show up here.</p><button class="btn" data-go="">Browse kits</button></div></div>`);
+    <h2>Your cart is empty</h2><p>Add an item or two and they’ll show up here.</p><button class="btn" data-go="">Browse items</button></div></div>`);
   return shell(`<div class="wrap">${back}
     <div class="cart">
-      <div class="items">${lines.map(cartItem).join("")}</div>
+      <div class="items">${lines.map((l, i) => cartItem(l, lines.slice(i + 1).some(x => x.id === l.id))).join("")}</div>
       <aside class="summary" id="sum">${summaryInner("cart")}</aside>
     </div></div>`);
 }
-function cartItem(l) {
-  const r = priceFor(l.p, l.qty), n = nudgeText(l.p, l.qty);
+function cartItem(l, moreBelow) { // the bulk note shows once, under the last line of that item
+  const r = priceFor(l.p, l.qty, l.bulkQty, extraFor(l.p, l.opts)), n = moreBelow ? null : nudgeText(l.p, l.bulkQty), ph = photosOf(l.p)[0];
   return `<div class="item">
-    ${l.p.photo ? `<img src="${esc(l.p.photo)}" alt="">` : `<span></span>`}
+    ${ph ? `<img src="${esc(ph)}" alt="">` : `<span></span>`}
     <div>
-      <h3><button data-go="kit-${esc(l.p.id)}">${esc(l.p.name)}</button></h3>
+      <h3><button data-go="item-${esc(l.p.id)}">${esc(l.p.name)}</button></h3>
+      ${l.opts && Object.keys(l.opts).length ? `<div class="opts">${esc(optLine(l.opts))}</div>` : ""}
       <div class="meta">${money(r.unit)} each${r.bulk ? ` · ${l.p.bulkPct}% bulk discount` : ""}</div>
-      <div class="controls">${stepper("cq", l.qty, l.p.id, true)}<button class="textbtn" data-remove="${esc(l.p.id)}">Remove</button></div>
+      <div class="controls">${stepper("cq", l.qty, l.key, true)}<button class="textbtn" data-remove="${esc(l.key)}">Remove</button></div>
       ${n ? `<div class="nudge ${n.won ? "won" : ""}">${esc(n.text)}</div>` : ""}
     </div>
     <div class="line-total">${r.bulk ? `<s>${money(r.full)}</s>` : ""}<b>${money(r.total)}</b></div>
@@ -271,14 +356,14 @@ function summaryInner(mode) {
   const d = mode === "checkout" ? deliveryInfo(t.total) : null;
   const freeOver = store.delivery.freeOver || 0;
   return `<h2>Order summary</h2>
-    <div class="sum-row"><span>${plural(n, "kit")}</span><span>${money(t.full)}</span></div>
+    <div class="sum-row"><span>${plural(n, "item")}</span><span>${money(t.full)}</span></div>
     ${t.save > 0 ? `<div class="sum-row save"><span>Bulk savings</span><span>−${money(t.save)}</span></div>` : ""}
     ${d ? `<div class="sum-row ${d.ok ? "" : "muted"}"><span>Delivery (estimate)</span><span>${d.label}</span></div>` : ""}
     ${d && freeOver > 0 && t.total < freeOver ? `<p class="fine">Free delivery on orders over ${money(freeOver)}.</p>` : ""}
     <div class="sum-row total"><span>Total</span><b>${money(t.total + (d && d.ok ? d.fee : 0))}</b></div>
     <p class="fine">No payment today. We’ll contact you to confirm and arrange ${store.delivery.enabled ? "pickup or delivery" : "pickup"}.</p>
     ${mode === "cart" ? `<button class="btn big block" data-go="checkout">Continue to checkout</button>`
-      : `<div style="display:grid;gap:10px;border-top:1px solid var(--line);padding-top:12px">${cartLines().map(l => { const r = priceFor(l.p, l.qty); return `<div class="mini">${l.p.photo ? `<img src="${esc(l.p.photo)}" alt="">` : ""}<div>${esc(l.p.name)}<br><span>${l.qty} × ${money(r.unit)}</span></div><b>${money(r.total)}</b></div>`; }).join("")}</div>`}`;
+      : `<div style="display:grid;gap:10px;border-top:1px solid var(--line);padding-top:12px">${cartLines().map(l => { const r = priceFor(l.p, l.qty, l.bulkQty, extraFor(l.p, l.opts)), ph = photosOf(l.p)[0]; return `<div class="mini">${ph ? `<img src="${esc(ph)}" alt="">` : ""}<div>${esc(l.p.name)}${l.opts && Object.keys(l.opts).length ? `<br><span>${esc(optLine(l.opts))}</span>` : ""}<br><span>${l.qty} × ${money(r.unit)}</span></div><b>${money(r.total)}</b></div>`; }).join("")}</div>`}`;
 }
 function refreshSummary(mode) { const el = document.getElementById("sum"); if (el) el.innerHTML = summaryInner(mode); }
 
@@ -357,7 +442,7 @@ async function placeOrder(form) {
   ui.busy = true; setBusy(btn, true, "Sending…");
   try {
     const res = await api("POST", "/api/orders", {
-      items: cart.map(l => ({ id: l.id, qty: l.qty })), method, date: f.date, notes: f.notes, botcheck: f.botcheck ? "on" : "",
+      items: cart.map(l => ({ id: l.id, qty: l.qty, opts: l.opts || {} })), method, analytics: analyticsIds(), date: f.date, notes: f.notes, botcheck: f.botcheck ? "on" : "",
       customer: { name: f.name, phone: f.phone, email: f.email },
       address: method === "delivery" ? { street: f.street, unit: f.unit, city: f.city, state: f.state, zip: (f.zip || "").trim() } : null
     });
@@ -376,7 +461,7 @@ function viewDone() {
     <div class="check">${CHECK}</div>
     <h1>Thanks, ${esc(o.name.split(" ")[0])}!</h1>
     <p>Your order request ${esc(o.id)} is in. We’ll reach out soon by phone or email to confirm the details.</p>
-    <div class="receipt">${o.items.map(i => `<div class="sum-row"><span>${i.qty} × ${esc(i.name)}</span><span>${money(i.total)}</span></div>`).join("")}
+    <div class="receipt">${o.items.map(i => `<div class="sum-row"><span>${i.qty} × ${esc(i.name)}${i.opts && i.opts.length ? `<br><small>${esc(i.opts.map(o => `${o.name}: ${o.value}`).join(" · "))}</small>` : ""}</span><span>${money(i.total)}</span></div>`).join("")}
       ${o.method === "delivery" ? `<div class="sum-row"><span>Delivery (estimate)</span><span>${o.delivery ? money(o.delivery) : "Free"}</span></div>` : ""}
       <div class="sum-row total"><span>Total</span><b>${money(o.total)}</b></div></div>
     <button class="btn" data-go="">Back to the shop</button>
@@ -427,7 +512,7 @@ async function sendMessage(form) {
   const btn = form.querySelector('button[type="submit"]');
   ui.busy = true; setBusy(btn, true, "Sending…");
   try {
-    const res = await api("POST", "/api/messages", { ...f, botcheck: f.botcheck ? "on" : "" });
+    const res = await api("POST", "/api/messages", { ...f, botcheck: f.botcheck ? "on" : "", analytics: analyticsIds() });
     await sendEmail(res.email, res.message.email, res.message.name);
     ui.contactSent = res.message.name.split(" ")[0]; render();
   } catch (e) { if (e.errors) showErrs(form, e.errors); alertEl.textContent = e.message; }
@@ -460,9 +545,9 @@ function viewAdmin() {
   const d = admin.data;
   const newOrders = d.orders.filter(o => o.status === "New").length, newMsgs = d.messages.filter(m => m.status === "New").length;
   const tab = (k, label, badge) => `<button role="tab" aria-selected="${admin.tab === k}" data-tab="${k}">${label}${badge ? `<span class="badge">${badge}</span>` : ""}</button>`;
-  const body = { products: adminProducts, season: adminSeason, delivery: adminDelivery, orders: adminOrders, messages: adminMessages }[admin.tab] || adminProducts;
+  const body = { products: adminProducts, season: adminSeason, delivery: adminDelivery, orders: adminOrders, messages: adminMessages, analytics: adminAnalytics }[admin.tab] || adminProducts;
   return adminTop() + `<main class="wrap">
-    <div class="tabs" role="tablist">${tab("products", "Products")}${tab("season", "Seasonal look")}${tab("delivery", "Delivery")}${tab("orders", "Orders", newOrders)}${tab("messages", "Messages", newMsgs)}</div>
+    <div class="tabs" role="tablist">${tab("products", "Items")}${tab("season", "Seasonal look")}${tab("delivery", "Delivery")}${tab("orders", "Orders", newOrders)}${tab("messages", "Messages", newMsgs)}${tab("analytics", "Analytics")}</div>
     ${body()}
     <div style="height:40px"></div>
   </main>`;
@@ -481,44 +566,64 @@ function adminFail(e) {
 function adminProducts() {
   const ps = admin.data.products;
   return `<div class="rows">
-    <button class="btn" data-new style="justify-self:start">+ Add a product</button>
+    <button class="btn" data-new style="justify-self:start">+ Add an item</button>
     ${ps.length ? ps.map(p => `<div class="prow">
       ${p.photo ? `<img src="${esc(p.photo)}" alt="">` : `<div class="noimg"></div>`}
       <div><h3>${esc(p.name)}<span class="status ${p.visible ? "on" : "off"}">${p.visible ? "Showing" : "Hidden"}</span></h3>
-      <div class="meta">${money(p.price)} each${hasBulk(p) ? ` · ${p.bulkPct}% off from ${p.bulkMin} kits` : " · no bulk discount"}</div></div>
+      <div class="meta">${money(p.price)} each${hasBulk(p) ? ` · ${p.bulkPct}% off from ${p.bulkMin}` : " · no bulk discount"}${photosOf(p).length > 1 ? ` · ${photosOf(p).length} photos` : ""}${(p.options || []).length ? ` · options: ${esc(p.options.map(g => g.name).join(", "))}` : ""}</div></div>
       <button class="btn line sm" data-edit="${esc(p.id)}">Edit</button>
-    </div>`).join("") : `<div class="empty-state"><h2>No products yet</h2><p>Tap “Add a product” to list your first kit.</p></div>`}
+    </div>`).join("") : `<div class="empty-state"><h2>No items yet</h2><p>Tap “Add an item” to list your first one.</p></div>`}
   </div>`;
 }
 function viewEdit() {
   const d = admin.draft, isNew = !d.id;
   return `<main class="wrap">
-    <button class="back" data-cancel>‹ All products</button>
-    <h1 class="page-title" style="margin-top:4px">${isNew ? "Add a product" : "Edit product"}</h1>
+    <button class="back" data-cancel>‹ All items</button>
+    <h1 class="page-title" style="margin-top:4px">${isNew ? "Add an item" : "Edit item"}</h1>
     <div class="edit">
       <form class="form-card" id="edit" novalidate>
         ${REQ_NOTE}
-        <div class="field"><span class="label" style="margin:0">Photo</span>
-          <div class="photo-pick">${d.photo ? `<img src="${esc(d.photo)}" alt="">` : `<div class="noimg"></div>`}
-          <label class="btn line sm">${d.photo ? "Change photo" : "Choose photo"}<input type="file" accept="image/*" id="e-file" hidden></label></div></div>
-        <div class="field"><label for="e-name">Product name${REQ}</label><input class="input" id="e-name" name="name" value="${esc(d.name)}" placeholder="e.g. Purim Mask Paint Kit"><span class="err" data-err="name"></span></div>
+        <div class="field"><span class="label" style="margin:0">Photos <span class="opt">Up to 10. The first one is the main photo.</span></span>
+          <div class="photo-list">${d.photos.map((u, i) => `<div class="photo-tile">
+            <img src="${esc(u)}" alt="Photo ${i + 1}">${i === 0 ? `<span class="main-tag">Main</span>` : `<button type="button" class="mk-main" data-ph-main="${i}">Make main</button>`}
+            <button type="button" class="x" data-ph-del="${i}" aria-label="Remove photo ${i + 1}">×</button></div>`).join("")}
+            ${d.photos.length < 10 ? `<label class="photo-add"><span>+</span>${d.photos.length ? "Add photos" : "Choose photos"}<input type="file" accept="image/*" id="e-file" multiple hidden></label>` : ""}
+          </div></div>
+        <div class="field"><label for="e-name">Item name${REQ}</label><input class="input" id="e-name" name="name" value="${esc(d.name)}" placeholder="e.g. Purim Mask Paint Kit"><span class="err" data-err="name"></span></div>
         <div class="field"><label for="e-blurb">Short description</label><textarea class="input" id="e-blurb" name="blurb" placeholder="What is it, and who is it for?">${esc(d.blurb)}</textarea></div>
-        <div class="field"><label for="e-incl">What’s in each kit <span class="opt">One item per line</span></label><textarea class="input" id="e-incl" name="included" rows="3" placeholder="1 plaster donut&#10;3 paint colors">${esc(d.included.join("\n"))}</textarea></div>
-        <div class="field"><label for="e-price">Price for one kit${REQ}</label><div class="adorn pre"><span>$</span><input class="input" id="e-price" name="price" inputmode="decimal" value="${d.price || ""}" placeholder="7.99"></div><span class="err" data-err="price"></span></div>
+        <div class="field"><label for="e-incl">What’s included <span class="opt">One per line</span></label><textarea class="input" id="e-incl" name="included" rows="3" placeholder="1 plaster donut&#10;3 paint colors">${esc(d.included.join("\n"))}</textarea></div>
+        <div class="field"><label for="e-price">Price for one${REQ}</label><div class="adorn pre"><span>$</span><input class="input" id="e-price" name="price" inputmode="decimal" value="${d.price || ""}" placeholder="7.99"></div><span class="err" data-err="price"></span></div>
         <div class="two">
-          <div class="field"><label for="e-min">Bulk discount starts at</label><div class="adorn post"><input class="input" id="e-min" name="bulkMin" inputmode="numeric" value="${d.bulkMin || ""}" placeholder="10"><span>kits</span></div></div>
+          <div class="field"><label for="e-min">Bulk discount starts at</label><div class="adorn post"><input class="input" id="e-min" name="bulkMin" inputmode="numeric" value="${d.bulkMin || ""}" placeholder="10"><span>items</span></div></div>
           <div class="field"><label for="e-pct">Bulk discount</label><div class="adorn post"><input class="input" id="e-pct" name="bulkPct" inputmode="decimal" value="${d.bulkPct || ""}" placeholder="16"><span>%</span></div></div>
         </div>
         <div class="example" id="example"></div>
+        <div class="field"><span class="label" style="margin:0">Options <span class="opt">Optional</span></span>
+          <p class="fine">For things like color or size. If an option has more than one choice, customers must pick one before they can add the item to their cart.</p>
+          ${d.options.map((g, i) => `<div class="opt-edit">
+            <div class="field"><label for="o-n${i}">Option name</label><input class="input" id="o-n${i}" data-oname="${i}" value="${esc(g.name)}" placeholder="${["Color", "Size", "Style"][i] || "Option"}"></div>
+            <div class="field"><label for="o-v${i}">Choices <span class="opt">Separate with commas</span></label><input class="input" id="o-v${i}" data-ovals="${i}" value="${esc(g.values.join(", "))}" placeholder="${["Red, Blue, Green", "Small, Medium, Large", "Classic, Glitter"][i] || "Choice 1, Choice 2"}"></div>
+            <button type="button" class="x" data-opt-del="${i}" aria-label="Remove this option">×</button>
+            <div class="opr" id="opr-${i}">${oprRows(g, i, d.price)}</div></div>`).join("")}
+          <span class="err" data-err="options"></span>
+          ${d.options.length < 5 ? `<button type="button" class="btn line sm" data-opt-add style="justify-self:start">+ Add an option${d.options.length ? "" : " (like color or size)"}</button>` : ""}
+        </div>
         <label class="toggle"><input type="checkbox" name="visible" ${d.visible ? "checked" : ""}>Show on the website</label>
         <div class="actions">
-          <button class="btn" type="submit">${isNew ? "Add product" : "Save changes"}</button>
+          <button class="btn" type="submit">${isNew ? "Add item" : "Save changes"}</button>
           <button class="btn line" type="button" data-cancel>Cancel</button>
           ${isNew ? "" : `<button class="btn danger ${admin.deleteArmed ? "armed" : ""}" type="button" data-delete>${admin.deleteArmed ? "Tap again to delete" : "Delete"}</button>`}
         </div>
       </form>
       <div class="side"><span class="label">How customers will see it</span><div id="preview" style="max-width:300px"></div></div>
     </div></main>`;
+}
+function oprRows(g, i, base) {
+  if (!g.values.length) return "";
+  return `<div class="opr-head"><b>Price for each choice</b> <span class="opt">Leave empty to use the item’s price. Type an amount to add, or a minus to take off (like -1).</span></div>
+    ${g.values.map((v, j) => { const ex = (g.extras && g.extras[j]) || 0; return `<div class="opr-row"><span class="opr-name">${esc(v)}</span>
+      <div class="adorn pre"><span>$</span><input class="input" data-oex="${i}" data-val="${esc(v)}" value="${ex ? ex : ""}" placeholder="0" autocomplete="off" aria-label="Price change for ${esc(v)}"></div>
+      <span class="opr-eq" data-eq="${i}:${j}">${money(base + ex)}</span></div>`; }).join("")}`;
 }
 function readDraft() {
   const f = document.getElementById("edit"); if (!f) return;
@@ -529,25 +634,38 @@ function readDraft() {
   d.bulkMin = parseInt(v("bulkMin")) || 0;
   d.bulkPct = Math.min(90, Math.max(0, parseFloat(v("bulkPct")) || 0));
   d.visible = f.elements.visible.checked;
+  d.options = d.options.map((g, i) => {
+    const n = f.querySelector(`[data-oname="${i}"]`), v = f.querySelector(`[data-ovals="${i}"]`);
+    if (!n || !v) return g;
+    const values = [...new Set(v.value.split(",").map(x => x.trim()).filter(Boolean))];
+    const ex = Object.fromEntries(g.values.map((x, j) => [x, (g.extras && g.extras[j]) || 0]));
+    f.querySelectorAll(`[data-oex="${i}"]`).forEach(inp => { const x = parseFloat(inp.value.replace(/[−–]/g, "-").replace(/[^\d.-]/g, "")); ex[inp.dataset.val] = Number.isFinite(x) ? r2(x) : 0; });
+    return { name: n.value.trim(), values, extras: values.map(x => ex[x] || 0) };
+  });
+  d.photo = d.photos[0] || "";
 }
 function updatePreview() {
   readDraft(); const d = admin.draft;
+  document.querySelectorAll("[data-eq]").forEach(el => { const [i, j] = el.dataset.eq.split(":").map(Number), g = d.options[i]; if (g) el.textContent = money(d.price + ((g.extras && g.extras[j]) || 0)); });
   document.getElementById("preview").innerHTML = card({ ...d, name: d.name || "Product name" }, true);
   const ex = document.getElementById("example");
-  if (d.price > 0 && hasBulk(d)) ex.textContent = `Customers pay ${money(d.price)} each, or ${money(bulkUnit(d))} each when they order ${d.bulkMin} or more. ${d.bulkMin} kits would cost ${money(bulkUnit(d) * d.bulkMin)}.`;
+  if (d.price > 0 && hasBulk(d)) ex.textContent = `Customers pay ${money(d.price)} each, or ${money(bulkUnit(d))} each when they order ${d.bulkMin} or more${needsChoice(d) ? " (any mix of options counts)" : ""}. ${d.bulkMin} would cost ${money(bulkUnit(d) * d.bulkMin)}.`;
   else if (d.price > 0) ex.textContent = `Customers pay ${money(d.price)} each. Fill in both bulk boxes to offer a discount.`;
   else ex.textContent = "Enter a price to see what customers will pay.";
 }
 async function saveProduct(form) {
   readDraft(); const d = admin.draft, errs = {};
-  if (!d.name.trim()) errs.name = "Give the product a name.";
+  if (!d.name.trim()) errs.name = "Give the item a name.";
+  if (d.options.some(g => g.values.length && !g.name)) errs.options = "Give each option a name, like Color or Size.";
+  else if (d.options.some(g => g.name && !g.values.length)) errs.options = "Add at least one choice to each option, or remove it.";
+  else if (d.price > 0 && !(priceRange(d).lo > 0)) errs.options = "A price change makes some choices cost $0 or less. Lower the minus amount.";
   if (!(d.price > 0)) errs.price = "Enter a price, like 7.99.";
   if (showErrs(form, errs) || admin.busy) return;
   const btn = form.querySelector('button[type="submit"]'); admin.busy = true; setBusy(btn, true, "Saving…");
   try {
     await api("POST", "/api/admin/products", d);
     const wasNew = !d.id; admin.draft = null; await loadAdmin(); window.scrollTo(0, 0);
-    toast(wasNew ? "Product added" : "Changes saved");
+    toast(wasNew ? "Item added" : "Changes saved");
   } catch (e) { if (e.errors) showErrs(form, e.errors); adminFail(e); }
   finally { admin.busy = false; setBusy(btn, false); }
 }
@@ -569,10 +687,10 @@ function adminSeason() {
         <label class="btn line sm">${s.photo ? "Change picture" : "Choose picture"}<input type="file" accept="image/*" id="s-file" hidden></label>
         ${s.photo ? `<button type="button" class="textbtn" data-sremove>Remove</button>` : ""}</div></div>
       <div class="field"><label for="s-head">Headline</label><input class="input" id="s-head" name="headline" value="${esc(s.headline)}" placeholder="e.g. Purim fun is here!"></div>
-      <div class="field"><label for="s-text">Message <span class="opt">Optional</span></label><textarea class="input" id="s-text" name="text" rows="2" placeholder="A short line about this season’s kits">${esc(s.text)}</textarea></div>
-      <div class="field"><label for="s-btn">Button text <span class="opt">Optional</span></label><input class="input" id="s-btn" name="button" value="${esc(s.button)}" placeholder="Shop kits"></div>
+      <div class="field"><label for="s-text">Message <span class="opt">Optional</span></label><textarea class="input" id="s-text" name="text" rows="2" placeholder="A short line about this season’s items">${esc(s.text)}</textarea></div>
+      <div class="field"><label for="s-btn">Button text <span class="opt">Optional</span></label><input class="input" id="s-btn" name="button" value="${esc(s.button)}" placeholder="Shop now"></div>
       <div class="field"><label for="s-link">Button opens</label><select class="input" id="s-link" name="link">
-        <option value="">All kits on the home page</option>
+        <option value="">All items on the home page</option>
         ${admin.data.products.map(p => `<option value="${esc(p.id)}" ${s.link === p.id ? "selected" : ""}>${esc(p.name)}${p.visible ? "" : " (hidden)"}</option>`).join("")}
       </select></div>
       <label class="toggle"><input type="checkbox" name="show" ${s.show ? "checked" : ""}>Show the banner on the home page</label>
@@ -590,7 +708,7 @@ function readSeason() {
 function updateSeasonPreview() {
   readSeason(); applyTheme(admin.sdraft.theme);
   document.getElementById("spreview").innerHTML = admin.sdraft.show ? bannerHTML(admin.sdraft, true)
-    : `<div class="empty-state" style="margin:0;box-shadow:none"><p style="margin:0">The banner is hidden. Customers will see your kits right away.</p></div>`;
+    : `<div class="empty-state" style="margin:0;box-shadow:none"><p style="margin:0">The banner is hidden. Customers will see your items right away.</p></div>`;
 }
 
 /* delivery */
@@ -645,7 +763,7 @@ function adminOrders() {
       <div class="meta">${esc(o.id)} · ${new Date(o.created_at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}</div></div>
       <select data-status="${esc(o.id)}" data-kind="orders" aria-label="Order status">${["New", "Confirmed", "Done"].map(s => `<option ${o.status === s ? "selected" : ""}>${s}</option>`).join("")}</select>
     </div>
-    <ul>${o.items.map(i => `<li><span>${i.qty} × ${esc(i.name)}${i.bulk ? ` <span class="meta">(${i.pct}% bulk)</span>` : ""}</span><span>${money(i.total)}</span></li>`).join("")}
+    <ul>${o.items.map(i => `<li><span>${i.qty} × ${esc(i.name)}${i.opts && i.opts.length ? ` <b class="opt-tag">${esc(i.opts.map(o => `${o.name}: ${o.value}`).join(" · "))}</b>` : ""}${i.bulk ? ` <span class="meta">(${i.pct}% bulk)</span>` : ""}</span><span>${money(i.total)}</span></li>`).join("")}
       ${o.method === "delivery" ? `<li><span>Delivery (estimate)</span><span>${o.delivery ? money(o.delivery) : "Free"}</span></li>` : ""}
       <li style="font-weight:700;border-top:1px solid var(--line);padding-top:6px"><span>Total</span><span>${money(o.total)}</span></li></ul>
     <div class="meta">${o.method === "delivery" ? "Local delivery: " + esc(addrText(o.address)) : "Pickup"}${o.date ? " · needed by " + esc(o.date) : ""}</div>
@@ -667,6 +785,96 @@ function adminMessages() {
   </div>`).join("")}</div>`;
 }
 
+/* analytics */
+async function loadAnalytics() {
+  admin.anLoading = true; if (admin.tab === "analytics") render(true);
+  try { admin.an = await api("GET", `/api/admin/analytics?range=${encodeURIComponent(admin.anRange)}&tz=${-new Date().getTimezoneOffset()}`); }
+  catch (e) { adminFail(e); }
+  finally { admin.anLoading = false; if (admin.tab === "analytics" && admin.authed) render(true); }
+}
+const n0 = n => Number(n || 0).toLocaleString();
+const pct = (a, b) => b ? Math.round(a / b * 1000) / 10 + "%" : "–";
+const dayLabel = (d, opts) => new Date(d + "T12:00:00Z").toLocaleDateString([], { timeZone: "UTC", ...(opts || { month: "short", day: "numeric" }) });
+const PAGE_NAMES = { home: "Home page", kit: "An item’s page", cart: "Cart", checkout: "Checkout", "order-sent": "Order sent", contact: "Contact page" };
+function barList(rows, labelFn, emptyText) {
+  if (!rows.length) return `<p class="fine">${emptyText}</p>`;
+  const max = Math.max(...rows.map(r => r.n), 1), total = rows.reduce((s, r) => s + r.n, 0);
+  return `<ul class="an-bars">${rows.map(r => `<li><div class="an-bar-label"><span>${esc(labelFn(r))}</span><b>${n0(r.n)} <small>${pct(r.n, total)}</small></b></div>
+    <div class="an-track"><i style="width:${Math.max(2, r.n / max * 100)}%"></i></div></li>`).join("")}</ul>`;
+}
+function adminAnalytics() {
+  const ranges = [["today", "Today"], ["7", "7 days"], ["30", "30 days"], ["90", "90 days"], ["all", "All time"]];
+  const head = `<div class="an-head">
+    <div class="an-ranges" role="group" aria-label="Time range">${ranges.map(([k, l]) => `<button data-range="${k}" aria-pressed="${admin.anRange === k}">${l}</button>`).join("")}</div>
+    <button class="btn line sm" data-an-refresh ${admin.anLoading ? "disabled" : ""}>${admin.anLoading ? "Loading…" : "Refresh"}</button>
+  </div>`;
+  const a = admin.an;
+  if (!a) return head + `<div class="loading">Loading analytics…</div>`;
+  const t = a.totals;
+  const rangeText = { today: "today", "7": "in the last 7 days", "30": "in the last 30 days", "90": "in the last 90 days", all: "since you started counting" }[a.range];
+  const tile = (label, value, sub) => `<div class="an-tile"><span>${label}</span><b>${value}</b>${sub ? `<small>${sub}</small>` : ""}</div>`;
+  const tiles = `<div class="an-tiles">
+    ${tile("Visitors", n0(t.visitors), `different people ${rangeText}`)}
+    ${tile("Visits", n0(t.visits), `${t.visits ? (t.pageviews / t.visits).toFixed(1) : 0} pages per visit`)}
+    ${tile("Page views", n0(t.pageviews), "every page anyone opened")}
+    ${tile("Returning visitors", n0(t.returning), `${pct(t.returning, t.visitors)} came back more than once`)}
+    ${tile("Added to cart", n0(t.adds), `${n0(a.funnel.added)} visits added an item`)}
+    ${tile("Order requests", n0(t.orders), `${n0(t.kitsOrdered)} items · ${money(t.revenue)} total`)}
+    ${tile("Contact messages", n0(t.messages), "sent from the Contact page")}
+    ${tile("Order rate", pct(a.funnel.ordered, a.funnel.visits), "of visits sent an order request")}
+  </div>`;
+
+  // visitors per day
+  const days = a.days, max = Math.max(1, ...days.map(d => d.visitors));
+  const step = Math.max(1, Math.ceil(days.length / 6));
+  const chart = days.length ? `<div class="an-card an-wide">
+    <div class="an-card-head"><h2>Visitors per day</h2><span class="fine">Hover or tap a bar for details</span></div>
+    <div class="an-chart" style="--n:${days.length}">
+      <div class="an-ymax">${n0(max)}</div>
+      <div class="an-cols">${days.map(d => `<div class="an-col" tabindex="0" aria-label="${esc(dayLabel(d.day))}: ${d.visitors} visitors">
+        <i style="height:${d.visitors ? Math.max(2, d.visitors / max * 100) : 0}%"></i>${d.orders ? `<em title="Order request"></em>` : ""}
+        <span class="an-tip"><b>${esc(dayLabel(d.day, { weekday: "short", month: "short", day: "numeric" }))}</b>
+          ${n0(d.visitors)} visitors<br>${n0(d.views)} page views<br>${n0(d.orders)} order requests<br>${n0(d.messages)} messages</span></div>`).join("")}</div>
+      <div class="an-xaxis">${days.map((d, i) => `<span>${(i % step === 0 && days.length - 1 - i >= step / 2) || i === days.length - 1 ? esc(dayLabel(d.day)) : ""}</span>`).join("")}</div>
+    </div>
+    <p class="fine an-legend"><i></i> Visitors <em></em> Day with an order request</p>
+    <details class="an-table"><summary>See the numbers day by day</summary>
+      <div class="an-scroll"><table><thead><tr><th>Day</th><th>Visitors</th><th>Page views</th><th>Orders</th><th>Messages</th></tr></thead>
+      <tbody>${days.slice().reverse().map(d => `<tr><td>${esc(dayLabel(d.day, { weekday: "short", month: "short", day: "numeric", year: "numeric" }))}</td><td>${n0(d.visitors)}</td><td>${n0(d.views)}</td><td>${n0(d.orders)}</td><td>${n0(d.messages)}</td></tr>`).join("")}</tbody></table></div>
+    </details>
+  </div>` : "";
+
+  // funnel
+  const f = a.funnel;
+  const steps = [["Visited the shop", f.visits], ["Looked at an item", f.viewedKit], ["Added to cart", f.added], ["Opened checkout", f.checkout], ["Sent an order request", f.ordered]];
+  const funnel = `<div class="an-card">
+    <h2>From visit to order</h2><p class="fine">How many visits reached each step</p>
+    <ul class="an-bars">${steps.map(([l, v]) => `<li><div class="an-bar-label"><span>${l}</span><b>${n0(v)} <small>${pct(v, f.visits)}</small></b></div>
+      <div class="an-track"><i style="width:${f.visits ? Math.max(v ? 2 : 0, v / f.visits * 100) : 0}%"></i></div></li>`).join("")}</ul>
+  </div>`;
+
+  const kits = `<div class="an-card">
+    <h2>Items</h2><p class="fine">Which items people look at and order</p>
+    ${a.kits.length ? `<div class="an-scroll"><table class="an-kits"><thead><tr><th>Item</th><th>Views</th><th>People</th><th>Added to cart</th><th>Ordered</th></tr></thead>
+      <tbody>${a.kits.map(k => `<tr><td>${esc(k.name)}</td><td>${n0(k.views)}</td><td>${n0(k.people)}</td><td>${n0(k.adds)}</td><td>${n0(k.sold)}</td></tr>`).join("")}</tbody></table></div>`
+      : `<p class="fine">No item views yet.</p>`}
+  </div>`;
+  const sources = `<div class="an-card"><h2>Where visitors come from</h2><p class="fine">The website or link that sent each visit</p>
+    ${barList(a.sources, r => r.name === "Direct" ? "Direct (typed the address, a saved link, or a text/WhatsApp message)" : r.name, "No visits yet.")}</div>`;
+  const devices = `<div class="an-card"><h2>Devices</h2><p class="fine">What people used to open the shop</p>${barList(a.devices, r => r.name, "No visits yet.")}</div>`;
+  const pages = `<div class="an-card"><h2>Most opened pages</h2><p class="fine">Page views by page</p>${barList(a.pages, r => PAGE_NAMES[r.name] || r.name, "No page views yet.")}</div>`;
+  const hmap = Object.fromEntries(a.hours.map(h => [h.h, h.n])), hmax = Math.max(1, ...Object.values(hmap));
+  const hourName = h => new Date(2000, 0, 1, h).toLocaleTimeString([], { hour: "numeric" });
+  const hours = `<div class="an-card"><h2>Busiest times of day</h2><p class="fine">Visits by hour, in your time zone</p>
+    <div class="an-hours">${Array.from({ length: 24 }, (_, h) => `<div class="an-col" tabindex="0" aria-label="${hourName(h)}: ${hmap[h] || 0} visits">
+      <i style="height:${hmap[h] ? Math.max(3, hmap[h] / hmax * 100) : 0}%"></i><span class="an-tip"><b>${hourName(h)}</b>${n0(hmap[h])} visits</span></div>`).join("")}</div>
+    <div class="an-xaxis an-hx"><span>12am</span><span>6am</span><span>12pm</span><span>6pm</span><span>11pm</span></div></div>`;
+
+  const live = `<div class="an-live"><span class="dot ${a.live ? "on" : ""}"></span>${a.live ? `${a.live === 1 ? "1 person is" : n0(a.live) + " people are"} on the shop right now` : "Nobody on the shop right now"}</div>`;
+  const note = `<p class="fine an-note">Counting started ${a.since ? new Date(a.since).toLocaleDateString([], { dateStyle: "medium" }) : "now, so numbers will appear once people visit"}. Visitors are counted anonymously (no names or addresses). Search engine robots, and your own visits while you’re signed in to the admin, aren’t counted. Order and message totals come from your Orders and Messages tabs.</p>`;
+  return head + live + tiles + chart + `<div class="an-grid">${funnel}${sources}${kits}${devices}${hours}${pages}</div>` + note;
+}
+
 /* ================= routing & events ================= */
 const route = () => decodeURIComponent(location.hash.replace(/^#/, ""));
 function render(keepScroll) {
@@ -681,7 +889,7 @@ function render(keepScroll) {
     else if (r === "checkout") html = viewCheckout();
     else if (r === "order-sent") html = viewDone();
     else if (r === "contact") html = viewContact();
-    else if (r.startsWith("kit-")) html = viewProduct(r.slice(4));
+    else if (itemRoute(r)) html = viewProduct(itemRoute(r));
     else html = viewHome();
     if (html === "") return;
   }
@@ -689,8 +897,9 @@ function render(keepScroll) {
   if (!IS_ADMIN) {
     const r = route();
     applyTheme(store.season.theme);
-    if (r.startsWith("kit-") && findP(r.slice(4))) updateProduct(r.slice(4));
+    if (itemRoute(r) && findP(itemRoute(r))) updateProduct(itemRoute(r));
     if (r === "checkout") updateZipNote();
+    if (ui.tracked !== r) { ui.tracked = r; track("pageview", pageName(r)); }
   } else if (admin.data) {
     applyTheme(admin.sdraft && admin.tab === "season" ? admin.sdraft.theme : admin.data.season.theme);
     if (admin.draft) updatePreview();
@@ -701,16 +910,37 @@ function render(keepScroll) {
 }
 function go(h) { if (route() === h) render(); else location.hash = h; }
 function focusSearch(pos) { const i = document.querySelector("[data-search]"); if (!i) return; i.focus(); const p = pos ?? i.value.length; try { i.setSelectionRange(p, p); } catch (e) {} }
-window.addEventListener("hashchange", () => { ui.contactSent = null; document.getElementById("toast").classList.remove("show"); if (!IS_ADMIN) render(); });
+window.addEventListener("hashchange", () => { ui.tracked = null; ui.contactSent = null; document.getElementById("toast").classList.remove("show"); if (!IS_ADMIN) render(); });
 
 document.addEventListener("click", async e => {
   const t = e.target.closest("button, a"); if (!t) return;
   const ds = t.dataset;
   if ("go" in ds) { e.preventDefault(); document.getElementById("toast").classList.remove("show"); go(ds.go); return; }
   if (ds.scroll) { document.getElementById(ds.scroll)?.scrollIntoView({ behavior: "smooth" }); return; }
-  if (ds.add) { addToCart(ds.add, "fromPage" in ds ? (ui.qty[ds.add] || 1) : 1); return; }
+  if (ds.add) {
+    const p = findP(ds.add); if (!p) return;
+    const fromPage = "fromPage" in ds, opts = fullOpts(p, fromPage ? ui.sel[p.id] : null);
+    if (!opts) {
+      if (!fromPage) { go("item-" + p.id); return; }
+      let first = null;
+      for (const g of p.options) if (!fullOpts({ options: [g] }, ui.sel[p.id])) {
+        const el = document.querySelector(`[data-opt-err="${CSS.escape(g.name)}"]`);
+        if (el) { el.textContent = `Choose a ${g.name.toLowerCase()}.`; first = first || el.closest(".opt-group"); }
+      }
+      if (first) { first.scrollIntoView({ behavior: "smooth", block: "center" }); first.querySelector("input")?.focus({ preventScroll: true }); }
+      return;
+    }
+    addToCart(p.id, fromPage ? (ui.qty[p.id] || 1) : 1, opts);
+    if (fromPage) updateProduct(p.id);
+    return;
+  }
+  if (ds.photo !== undefined && ds.pid) {
+    const p = findP(ds.pid), i = Number(ds.photo), u = p && photosOf(p)[i]; if (!u) return;
+    ui.photo[p.id] = i; document.getElementById("mainPhoto").src = u;
+    document.querySelectorAll("[data-photo]").forEach(b => b.setAttribute("aria-pressed", b === t)); return;
+  }
   if (ds.step) { const input = t.parentElement.querySelector("input"); input.value = setQty(ds.ctx, ds.id, (parseInt(input.value) || 1) + Number(ds.step)); return; }
-  if (ds.remove) { cart = cart.filter(l => l.id !== ds.remove); saveCart(); render(true); toast("Removed from cart"); return; }
+  if (ds.remove) { cart = cart.filter(l => lineKey(l) !== ds.remove); saveCart(); render(true); toast("Removed from cart"); return; }
   if ("clearSearch" in ds) { ui.query = ""; render(); return; }
   if ("searchToggle" in ds) {
     if (ui.searchOpen || ui.query) { ui.searchOpen = false; ui.query = ""; render(true); }
@@ -721,9 +951,15 @@ document.addEventListener("click", async e => {
 
   /* admin */
   if ("signout" in ds) { try { await api("POST", "/api/admin/logout"); } catch (err) {} admin.authed = false; admin.data = null; admin.loginError = ""; render(); return; }
-  if (ds.tab) { admin.tab = ds.tab; admin.sdraft = null; admin.ddraft = null; render(true); return; }
-  if ("new" in ds) { admin.draft = { id: null, name: "", blurb: "", included: [], price: 0, bulkMin: 10, bulkPct: 10, visible: true, photo: "" }; admin.deleteArmed = false; render(); return; }
-  if (ds.edit) { admin.draft = structuredClone(admin.data.products.find(p => p.id === ds.edit)); admin.deleteArmed = false; render(); return; }
+  if (ds.tab) { admin.tab = ds.tab; admin.sdraft = null; admin.ddraft = null; render(true); if (ds.tab === "analytics") loadAnalytics(); return; }
+  if (ds.range) { admin.anRange = ds.range; loadAnalytics(); return; }
+  if ("anRefresh" in ds) { loadAnalytics(); return; }
+  if ("new" in ds) { admin.draft = { id: null, name: "", blurb: "", included: [], price: 0, bulkMin: 10, bulkPct: 10, visible: true, photo: "", photos: [], options: [] }; admin.deleteArmed = false; render(); return; }
+  if ("optAdd" in ds) { readDraft(); admin.draft.options.push({ name: "", values: [] }); render(true); document.getElementById(`o-n${admin.draft.options.length - 1}`)?.focus(); return; }
+  if (ds.optDel !== undefined) { readDraft(); admin.draft.options.splice(Number(ds.optDel), 1); render(true); return; }
+  if (ds.phDel !== undefined) { readDraft(); admin.draft.photos.splice(Number(ds.phDel), 1); render(true); return; }
+  if (ds.phMain !== undefined) { readDraft(); const ph = admin.draft.photos; ph.unshift(...ph.splice(Number(ds.phMain), 1)); render(true); return; }
+  if (ds.edit) { const src = admin.data.products.find(p => p.id === ds.edit); admin.draft = { photos: photosOf(src), options: [], ...structuredClone(src) }; admin.deleteArmed = false; render(); return; }
   if ("cancel" in ds) { admin.draft = null; render(); return; }
   if ("delete" in ds) {
     if (!admin.deleteArmed) { readDraft(); admin.deleteArmed = true; render(true); return; }
@@ -769,6 +1005,7 @@ document.addEventListener("input", e => {
   if ("qty" in t.dataset && t.dataset.ctx === "pq") { const n = parseInt(t.value); if (n >= 1) setQty("pq", t.dataset.id, n); }
   if (t.id === "c-zip") checkZip(t.value.trim());
   if (t.closest("#edit") && t.type !== "file") updatePreview();
+  if (t.dataset.ovals !== undefined) { const i = Number(t.dataset.ovals), el = document.getElementById(`opr-${i}`); if (el) el.innerHTML = oprRows(admin.draft.options[i], i, admin.draft.price); }
   if (t.closest("#season") && t.type !== "file") updateSeasonPreview();
   if (t.dataset.ring !== undefined) { const v = parseFloat(t.value); admin.ddraft.rings[Number(t.dataset.ring)][t.dataset.k] = Number.isFinite(v) ? v : 0; }
   if (t.dataset.zone) { const z = admin.ddraft.zones[t.dataset.zone]; const v = parseFloat(t.value); if (z && v >= 0) { z.fee = r2(v); z.manual = true; } }
@@ -776,6 +1013,11 @@ document.addEventListener("input", e => {
 document.addEventListener("change", async e => {
   const t = e.target;
   if ("qty" in t.dataset) { const n = parseInt(t.value); t.value = setQty(t.dataset.ctx, t.dataset.id, n >= 1 ? n : 1); }
+  if (t.dataset.optGroup && t.dataset.pid) {
+    const sel = ui.sel[t.dataset.pid] ||= {}; sel[t.dataset.optGroup] = t.value;
+    const fs = t.closest(".opt-group"); fs.querySelector(".opt-chosen").textContent = t.value; fs.querySelector(".err").textContent = "";
+    updateProduct(t.dataset.pid);
+  }
   if (t.name === "method") {
     ui.method = t.value; document.getElementById("addr").hidden = t.value !== "delivery";
     refreshSummary("checkout");
@@ -789,13 +1031,24 @@ document.addEventListener("change", async e => {
   }
   if (t.closest("#edit") && t.type === "checkbox") updatePreview();
   if (t.closest("#season") && (t.type === "checkbox" || t.type === "radio" || t.tagName === "SELECT")) updateSeasonPreview();
-  if ((t.id === "e-file" || t.id === "s-file") && t.files[0]) {
-    const isSeason = t.id === "s-file";
-    if (isSeason) readSeason(); else readDraft();
+  if (t.id === "e-file" && t.files.length) {
+    readDraft();
+    const d = admin.draft, files = [...t.files].slice(0, 10 - d.photos.length);
+    toast(files.length > 1 ? `Uploading ${files.length} photos…` : "Uploading photo…");
+    let added = 0;
+    for (const file of files) {
+      try { d.photos.push(await uploadPhoto(file, 1400)); added++; }
+      catch (err) { if (err.status) adminFail(err); else toast("A photo couldn’t be opened. Try a JPG or PNG."); break; }
+    }
+    if (admin.draft === d) { d.photo = d.photos[0] || ""; render(true); }
+    if (added) toast(`${added > 1 ? added + " photos" : "Photo"} uploaded. Remember to save.`);
+    if (t.files.length > files.length) toast("You can add up to 10 photos per item.");
+  }
+  if (t.id === "s-file" && t.files[0]) {
+    readSeason();
     toast("Uploading photo…");
     try {
-      const url = await uploadPhoto(t.files[0], isSeason ? 1800 : 1200);
-      if (isSeason) admin.sdraft.photo = url; else admin.draft.photo = url;
+      admin.sdraft.photo = await uploadPhoto(t.files[0], 1800);
       render(true); toast("Photo uploaded. Remember to save.");
     } catch (err) { if (err.status) adminFail(err); else toast("That photo couldn’t be opened. Try a JPG or PNG."); }
   }
@@ -842,7 +1095,10 @@ document.addEventListener("submit", async e => {
   }
   try {
     store = await api("GET", "/api/store");
-    cart = cart.filter(l => findP(l.id) && Number.isInteger(l.qty) && l.qty >= 1); saveCart();
+    // drop anything no longer sold, and lines whose color/size choice no longer exists
+    cart = cart.filter(l => findP(l.id) && Number.isInteger(l.qty) && l.qty >= 1 && (l.opts = fullOpts(findP(l.id), l.opts)));
+    const merged = []; for (const l of cart) { const m = merged.find(x => lineKey(x) === lineKey(l)); if (m) m.qty = Math.min(999, m.qty + l.qty); else merged.push(l); }
+    cart = merged; saveCart();
     render();
   } catch (e) {
     document.getElementById("app").innerHTML = `<div class="loading"><div style="text-align:center"><p>The shop couldn’t load right now.</p><a class="btn" href="/">Try again</a></div></div>`;

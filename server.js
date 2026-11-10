@@ -32,15 +32,27 @@ CREATE TABLE IF NOT EXISTS products (
 CREATE TABLE IF NOT EXISTS orders (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, status TEXT NOT NULL, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, status TEXT NOT NULL, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, visitor TEXT NOT NULL, visit TEXT NOT NULL,
+  type TEXT NOT NULL, page TEXT NOT NULL DEFAULT '', product TEXT NOT NULL DEFAULT '',
+  source TEXT NOT NULL DEFAULT '', device TEXT NOT NULL DEFAULT '');
+CREATE INDEX IF NOT EXISTS events_at ON events(at);
 `);
+// added later: several photos and choosable options (color, size…) per item
+const cols = db.prepare("PRAGMA table_info(products)").all().map(c => c.name);
+if (!cols.includes("photos")) {
+  db.exec("ALTER TABLE products ADD COLUMN photos TEXT NOT NULL DEFAULT '[]'");
+  db.exec("UPDATE products SET photos = json_array(photo) WHERE photo != ''");
+}
+if (!cols.includes("options")) db.exec("ALTER TABLE products ADD COLUMN options TEXT NOT NULL DEFAULT '[]'");
 const getSetting = (k, fallback) => { const r = db.prepare("SELECT value FROM settings WHERE key=?").get(k); return r ? JSON.parse(r.value) : fallback; };
 const setSetting = (k, v) => db.prepare("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(k, JSON.stringify(v));
 
 if (!getSetting("seeded", false)) {
-  db.prepare(`INSERT OR IGNORE INTO products(id,name,blurb,included,price,bulk_min,bulk_pct,visible,photo,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`)
+  db.prepare(`INSERT OR IGNORE INTO products(id,name,blurb,included,price,bulk_min,bulk_pct,visible,photo,photos,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`)
     .run("chanukah", "Chanukah Paint Party Kit",
       "A paint-your-own plaster donut kit. A fun, creative Chanukah activity for kids, perfect for parties, classrooms and family nights.",
-      JSON.stringify(["1 plaster donut", "3 paint colors", "1 paintbrush"]), 7.99, 10, 16, 1, "/img/kit.jpg", new Date().toISOString());
+      JSON.stringify(["1 plaster donut", "3 paint colors", "1 paintbrush"]), 7.99, 10, 16, 1, "/img/kit.jpg", JSON.stringify(["/img/kit.jpg"]), new Date().toISOString());
   setSetting("season", { theme: "chanukah", show: true, headline: "Chanukah is almost here!",
     text: "Paint-your-own donut kits that make your party glow. Order for the whole class or family.",
     button: "Shop Chanukah kits", link: "chanukah", photo: "/img/scene.jpg" });
@@ -59,15 +71,53 @@ const isZip = z => /^\d{5}$/.test(z);
 const isEmail = e => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
 const isPhone = p => p.replace(/\D/g, "").length >= 7;
 const safeUrl = u => (typeof u === "string" && /^\/(img|uploads)\/[\w.-]+$/.test(u)) ? u : "";
-const rowToProduct = r => r && ({ id: r.id, name: r.name, blurb: r.blurb, included: JSON.parse(r.included), price: r.price,
-  bulkMin: r.bulk_min, bulkPct: r.bulk_pct, visible: !!r.visible, photo: r.photo });
+function rowToProduct(r) {
+  if (!r) return r;
+  let photos = JSON.parse(r.photos || "[]");
+  if (!photos.length && r.photo) photos = [r.photo];
+  return { id: r.id, name: r.name, blurb: r.blurb, included: JSON.parse(r.included), price: r.price,
+    bulkMin: r.bulk_min, bulkPct: r.bulk_pct, visible: !!r.visible, photo: photos[0] || "", photos,
+    options: JSON.parse(r.options || "[]").map(g => ({ ...g, extras: g.values.map((_, i) => num(g.extras && g.extras[i]) || 0) })) };
+}
+// options look like [{ name: "Size", values: ["Small", "Large"], extras: [0, 3] }]
+// extras = how much each choice adds to (or, if negative, takes off) the item's price
+function cleanOptions(list) {
+  const out = [], seen = new Set();
+  for (const g of Array.isArray(list) ? list : []) {
+    const name = str(g && g.name, 40), key = name.toLowerCase();
+    if (!name || seen.has(key)) continue;
+    const vals = [], extras = [], vseen = new Set();
+    (Array.isArray(g.values) ? g.values : []).forEach((v, i) => {
+      const t = str(v, 40); if (!t || vseen.has(t.toLowerCase())) return;
+      vseen.add(t.toLowerCase()); vals.push(t);
+      const e = r2(num(Array.isArray(g.extras) ? g.extras[i] : 0));
+      extras.push(Number.isFinite(e) ? Math.max(-100000, Math.min(100000, e)) : 0);
+    });
+    if (!vals.length) continue;
+    seen.add(key); out.push({ name, values: vals.slice(0, 30), extras: extras.slice(0, 30) });
+  }
+  return out.slice(0, 5);
+}
+// returns the customer's choice for each option group, or an error message
+function pickOptions(p, chosen) {
+  const c = chosen && typeof chosen === "object" ? chosen : {}, picked = [];
+  for (const g of p.options) {
+    const v = g.values.length === 1 ? g.values[0] : g.values.find(x => x === c[g.name]);
+    if (!v) return { error: `Choose a ${g.name.toLowerCase()} for ${p.name}.` };
+    picked.push({ name: g.name, value: v, extra: g.extras[g.values.indexOf(v)] || 0 });
+  }
+  return { picked };
+}
+const optsText = opts => (opts || []).map(o => `${o.name}: ${o.value}`).join(", ");
+const lowestPrice = p => r2(p.price + p.options.reduce((s, g) => s + Math.min(...g.extras), 0));
 const allProducts = () => db.prepare("SELECT * FROM products ORDER BY created_at").all().map(rowToProduct);
 const findProduct = id => rowToProduct(db.prepare("SELECT * FROM products WHERE id=?").get(id));
 const hasBulk = p => p.bulkMin > 1 && p.bulkPct > 0;
-function priceFor(p, q) {
-  const bulk = hasBulk(p) && q >= p.bulkMin;
-  const unit = bulk ? r2(p.price * (1 - p.bulkPct / 100)) : p.price;
-  return { bulk, unit, total: r2(unit * q), full: r2(p.price * q) };
+// bulkQty: all of this item in the order, across colors/sizes; extra: price change from the chosen options
+function priceFor(p, q, bulkQty = q, extra = 0) {
+  const each = r2(p.price + extra), bulk = hasBulk(p) && bulkQty >= p.bulkMin;
+  const unit = bulk ? r2(each * (1 - p.bulkPct / 100)) : each;
+  return { bulk, unit, total: r2(unit * q), full: r2(each * q) };
 }
 function milesBetween(a, b) {
   const R = 3958.8, rad = x => x * Math.PI / 180;
@@ -141,15 +191,22 @@ function buildOrder(body) {
   if (!isPhone(phone)) errors.phone = "Enter a phone number we can call or text.";
   if (!isEmail(email)) errors.email = "Enter an email like name@example.com.";
   const method = body.method === "delivery" ? "delivery" : "pickup";
-  const items = [];
+  const lines = [], perItem = {};
   for (const it of Array.isArray(body.items) ? body.items.slice(0, 50) : []) {
     const p = findProduct(String(it.id || ""));
     const qty = Math.floor(num(it.qty));
     if (!p || !p.visible || !(qty >= 1 && qty <= 999)) continue;
-    const r = priceFor(p, qty);
-    items.push({ id: p.id, name: p.name, qty, unit: r.unit, total: r.total, full: r.full, bulk: r.bulk, pct: p.bulkPct });
+    const { picked, error } = pickOptions(p, it.opts);
+    if (error) { errors.items = error; continue; }
+    const same = lines.find(l => l.p.id === p.id && optsText(l.opts) === optsText(picked));
+    if (same) same.qty = Math.min(999, same.qty + qty); else lines.push({ p, qty, opts: picked });
+    perItem[p.id] = (perItem[p.id] || 0) + qty;
   }
-  if (!items.length) errors.items = "Your cart is empty or a kit is no longer available.";
+  const items = lines.map(({ p, qty, opts }) => {
+    const r = priceFor(p, qty, perItem[p.id], opts.reduce((s, o) => s + o.extra, 0));
+    return { id: p.id, name: p.name, opts: opts.map(({ name, value }) => ({ name, value })), qty, unit: r.unit, total: r.total, full: r.full, bulk: r.bulk, pct: p.bulkPct };
+  });
+  if (!items.length && !errors.items) errors.items = "Your cart is empty or an item is no longer available.";
   const subtotal = r2(items.reduce((s, i) => s + i.total, 0)), full = r2(items.reduce((s, i) => s + i.full, 0));
   let address = null, delivery = 0;
   if (method === "delivery") {
@@ -171,10 +228,10 @@ function buildOrder(body) {
 function orderEmail(o) {
   const addr = o.address ? `${o.address.street}${o.address.unit ? ", " + o.address.unit : ""}, ${o.address.city}, ${o.address.state} ${o.address.zip}` : "";
   return {
-    subject: `New order ${o.id}: ${o.items.reduce((s, i) => s + i.qty, 0)} kits, ${money(o.total)}`,
+    subject: `New order ${o.id}: ${o.items.reduce((s, i) => s + i.qty, 0)} items, ${money(o.total)}`,
     text: `New order request ${o.id}
 
-${o.items.map(i => `• ${i.qty} × ${i.name} @ ${money(i.unit)}${i.bulk ? ` (${i.pct}% bulk)` : ""} = ${money(i.total)}`).join("\n")}
+${o.items.map(i => `• ${i.qty} × ${i.name}${i.opts && i.opts.length ? ` (${optsText(i.opts)})` : ""} @ ${money(i.unit)}${i.bulk ? ` (${i.pct}% bulk)` : ""} = ${money(i.total)}`).join("\n")}
 ${o.save > 0 ? `Bulk savings: −${money(o.save)}\n` : ""}Subtotal: ${money(o.subtotal)}
 ${o.method === "delivery" ? `Delivery (estimate): ${o.delivery ? money(o.delivery) : "Free"}\n` : ""}Total: ${money(o.total)}
 
@@ -198,6 +255,7 @@ app.post("/api/orders", limit("order", 10, 15 * 60e3), (req, res) => {
     db.prepare("INSERT INTO orders(id,created_at,status,data) VALUES(?,?,?,?)").run(order.id, order.created_at, order.status, JSON.stringify(order));
   });
   save();
+  track(req, { ...(req.body.analytics || {}), type: "order" });
   res.json({ order, email: orderEmail(order) });
 });
 
@@ -214,9 +272,42 @@ app.post("/api/messages", limit("message", 8, 15 * 60e3), (req, res) => {
   m.id = "M" + Date.now().toString(36) + crypto.randomBytes(2).toString("hex");
   m.created_at = new Date().toISOString(); m.status = "New";
   db.prepare("INSERT INTO messages(id,created_at,status,data) VALUES(?,?,?,?)").run(m.id, m.created_at, m.status, JSON.stringify(m));
+  track(req, { ...(b.analytics || {}), type: "message" });
   res.json({ message: m, email: { subject: `New message: ${m.topic}`,
     text: `New message from the website\n\nTopic: ${m.topic}\nName: ${m.name}\nPhone: ${m.phone}\nEmail: ${m.email}\n\n${m.message}` } });
 });
+
+/* ----- visitor analytics (anonymous: a random browser id, no names, emails or IP addresses) ----- */
+const EVENT_TYPES = ["pageview", "add_to_cart", "order", "message"];
+const BOT_UA = /bot|crawl|spider|slurp|preview|facebookexternalhit|headless|lighthouse|monitor|curl|wget|python|node-fetch|axios/i;
+const deviceOf = ua => /ipad|tablet|kindle|playbook|silk|(android(?!.*mobile))/i.test(ua) ? "Tablet" : /mobi|iphone|ipod|android/i.test(ua) ? "Phone" : "Computer";
+const anonId = v => (typeof v === "string" && /^[a-z0-9]{8,40}$/i.test(v)) ? v : "";
+function sourceOf(ref, utm, host) {
+  const u = str(utm, 60).toLowerCase();
+  if (u) return u.replace(/[^a-z0-9 ._-]/g, "").slice(0, 60) || "Direct";
+  try {
+    const h = new URL(ref).hostname.replace(/^www\./, "").toLowerCase();
+    if (!h || h === String(host || "").replace(/^www\./, "").toLowerCase()) return "Direct";
+    return h.slice(0, 80);
+  } catch (e) { return "Direct"; }
+}
+const insertEvent = db.prepare("INSERT INTO events(at,visitor,visit,type,page,product,source,device) VALUES(?,?,?,?,?,?,?,?)");
+function track(req, e) {
+  const ua = String(req.get("user-agent") || "");
+  if (!ua || BOT_UA.test(ua)) return;
+  if (req.session && req.session.admin) return; // the owner browsing the shop doesn't count
+  const visitor = anonId(e.visitor), visit = anonId(e.visit);
+  if (!visitor || !visit || !EVENT_TYPES.includes(e.type)) return;
+  insertEvent.run(new Date().toISOString(), visitor, visit, e.type, str(e.page, 60), str(e.product, 60),
+    e.type === "pageview" ? sourceOf(str(e.ref, 300), e.utm, req.hostname) : "", deviceOf(ua));
+}
+app.post("/api/track", limit("track", 240, 15 * 60e3), (req, res) => {
+  const b = req.body || {};
+  if (b.type === "order" || b.type === "message") return res.status(204).end(); // recorded by the server itself
+  track(req, b);
+  res.status(204).end();
+});
+setInterval(() => db.prepare("DELETE FROM events WHERE at < ?").run(new Date(Date.now() - 400 * 864e5).toISOString()), 24 * 3600e3).unref();
 
 /* ----- owner API ----- */
 const sha = s => crypto.createHash("sha256").update(String(s)).digest();
@@ -239,44 +330,111 @@ app.get("/api/admin/all", requireAdmin, (req, res) => {
     season: getSetting("season", {}), delivery: getSetting("delivery", {}) });
 });
 
-const slug = s => (s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "kit");
+app.get("/api/admin/analytics", requireAdmin, (req, res) => {
+  const RANGES = { today: 0, "7": 7, "30": 30, "90": 90, all: null };
+  const range = Object.hasOwn(RANGES, req.query.range) ? req.query.range : "30";
+  const tz = Math.max(-840, Math.min(840, Math.round(num(req.query.tz) || 0))); // browser's offset from UTC, minutes
+  const shift = `${tz >= 0 ? "+" : ""}${tz} minutes`;
+  const localDay = d => new Date(d.getTime() + tz * 60e3).toISOString().slice(0, 10);
+  const today = localDay(new Date());
+  let from = "";
+  if (range !== "all") {
+    const start = new Date(Date.parse(today + "T00:00:00Z") - RANGES[range] * 864e5 + (RANGES[range] ? 864e5 : 0));
+    from = new Date(start.getTime() - tz * 60e3).toISOString(); // local midnight, as UTC
+  }
+  const q = (sql, ...a) => db.prepare(sql).all(from, ...a);
+  const one = (sql, ...a) => db.prepare(sql).get(from, ...a);
+  const W = "at >= ?";
+  const totals = one(`SELECT COUNT(DISTINCT visitor) visitors, COUNT(DISTINCT visit) visits,
+      SUM(type='pageview') pageviews, SUM(type='add_to_cart') adds,
+      COUNT(DISTINCT CASE WHEN type='pageview' AND page='checkout' THEN visit END) checkouts FROM events WHERE ${W}`);
+  const returning = one(`SELECT COUNT(*) n FROM (SELECT visitor FROM events WHERE ${W} GROUP BY visitor HAVING COUNT(DISTINCT visit) > 1)`).n;
+  const funnel = one(`SELECT COUNT(DISTINCT visit) visits,
+      COUNT(DISTINCT CASE WHEN type='pageview' AND page='kit' THEN visit END) viewedKit,
+      COUNT(DISTINCT CASE WHEN type='add_to_cart' THEN visit END) added,
+      COUNT(DISTINCT CASE WHEN type='pageview' AND page='checkout' THEN visit END) checkout,
+      COUNT(DISTINCT CASE WHEN type='order' THEN visit END) ordered FROM events WHERE ${W}`);
+  const fromOr = from || "0";
+  const orders = db.prepare("SELECT data FROM orders WHERE created_at >= ?").all(fromOr).map(r => JSON.parse(r.data));
+  const messages = db.prepare("SELECT COUNT(*) n FROM messages WHERE created_at >= ?").get(fromOr).n;
+  const daily = q(`SELECT date(at, '${shift}') day, COUNT(DISTINCT visitor) visitors, SUM(type='pageview') views
+      FROM events WHERE ${W} GROUP BY day ORDER BY day`);
+  const dayOrders = {}, dayMsgs = {};
+  for (const o of orders) { const d = localDay(new Date(o.created_at)); dayOrders[d] = (dayOrders[d] || 0) + 1; }
+  for (const r of db.prepare("SELECT created_at FROM messages WHERE created_at >= ?").all(fromOr)) { const d = localDay(new Date(r.created_at)); dayMsgs[d] = (dayMsgs[d] || 0) + 1; }
+  // fill every day in the range so quiet days show as zero
+  const byDay = Object.fromEntries(daily.map(r => [r.day, r]));
+  const first = from ? localDay(new Date(from)) : [daily[0] && daily[0].day, ...Object.keys(dayOrders), ...Object.keys(dayMsgs)].filter(Boolean).sort()[0] || today;
+  const days = [];
+  for (let t = Date.parse(first + "T00:00:00Z"); t <= Date.parse(today + "T00:00:00Z") && days.length < 800; t += 864e5) {
+    const d = new Date(t).toISOString().slice(0, 10), r = byDay[d] || {};
+    days.push({ day: d, visitors: r.visitors || 0, views: r.views || 0, orders: dayOrders[d] || 0, messages: dayMsgs[d] || 0 });
+  }
+  const names = Object.fromEntries(allProducts().map(p => [p.id, p.name]));
+  const kits = q(`SELECT product id, SUM(type='pageview') views, SUM(type='add_to_cart') adds, COUNT(DISTINCT CASE WHEN type='pageview' THEN visitor END) people
+      FROM events WHERE ${W} AND product != '' GROUP BY product ORDER BY views DESC LIMIT 20`)
+    .map(k => ({ ...k, name: names[k.id] || k.id + " (deleted)" }));
+  const sold = {};
+  for (const o of orders) for (const i of o.items) sold[i.id] = (sold[i.id] || 0) + i.qty;
+  for (const k of kits) k.sold = sold[k.id] || 0;
+  const firstSource = `SELECT visit, source FROM events WHERE ${W} AND type='pageview' AND id IN (SELECT MIN(id) FROM events WHERE ${W} AND type='pageview' GROUP BY visit)`;
+  const sources = db.prepare(`SELECT source name, COUNT(*) n FROM (${firstSource}) GROUP BY source ORDER BY n DESC LIMIT 12`).all(from, from);
+  const devices = q(`SELECT device name, COUNT(DISTINCT visitor) n FROM events WHERE ${W} GROUP BY device ORDER BY n DESC`);
+  const pages = q(`SELECT page name, COUNT(*) n FROM events WHERE ${W} AND type='pageview' GROUP BY page ORDER BY n DESC LIMIT 10`);
+  const hours = q(`SELECT CAST(strftime('%H', at, '${shift}') AS INTEGER) h, COUNT(DISTINCT visit) n FROM events WHERE ${W} GROUP BY h`);
+  const live = db.prepare("SELECT COUNT(DISTINCT visitor) n FROM events WHERE at >= ?").get(new Date(Date.now() - 5 * 60e3).toISOString()).n;
+  const firstEvent = db.prepare("SELECT MIN(at) at FROM events").get().at;
+  res.json({
+    range, live, since: firstEvent,
+    totals: { visitors: totals.visitors || 0, visits: totals.visits || 0, pageviews: totals.pageviews || 0, adds: totals.adds || 0,
+      checkouts: totals.checkouts || 0, orders: orders.length, messages, returning,
+      revenue: r2(orders.reduce((s, o) => s + (o.total || 0), 0)), kitsOrdered: orders.reduce((s, o) => s + o.items.reduce((a, i) => a + i.qty, 0), 0) },
+    funnel, days, kits, sources, devices, pages, hours
+  });
+});
+
+const slug = s => (s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "item");
 app.post("/api/admin/products", requireAdmin, (req, res) => {
   const b = req.body || {};
   const p = {
     name: str(b.name, 120), blurb: str(b.blurb, 1500),
     included: (Array.isArray(b.included) ? b.included : []).map(x => str(x, 120)).filter(Boolean).slice(0, 30),
     price: r2(num(b.price)), bulkMin: Math.max(0, Math.floor(num(b.bulkMin) || 0)),
-    bulkPct: Math.min(90, Math.max(0, num(b.bulkPct) || 0)), visible: !!b.visible, photo: safeUrl(b.photo)
+    bulkPct: Math.min(90, Math.max(0, num(b.bulkPct) || 0)), visible: !!b.visible,
+    photos: [...new Set((Array.isArray(b.photos) ? b.photos : [b.photo]).map(safeUrl).filter(Boolean))].slice(0, 10),
+    options: cleanOptions(b.options)
   };
+  p.photo = p.photos[0] || "";
   const errors = {};
-  if (!p.name) errors.name = "Give the product a name.";
+  if (!p.name) errors.name = "Give the item a name.";
   if (!(p.price > 0 && p.price < 100000)) errors.price = "Enter a price, like 7.99.";
+  else if (!(lowestPrice(p) > 0)) errors.options = "A price change makes some choices cost $0 or less. Lower the minus amount.";
   if (Object.keys(errors).length) return res.status(400).json({ error: "Please fix the highlighted fields.", errors });
   let id = typeof b.id === "string" && findProduct(b.id) ? b.id : null;
   if (id) {
     const old = findProduct(id);
-    db.prepare("UPDATE products SET name=?,blurb=?,included=?,price=?,bulk_min=?,bulk_pct=?,visible=?,photo=? WHERE id=?")
-      .run(p.name, p.blurb, JSON.stringify(p.included), p.price, p.bulkMin, p.bulkPct, p.visible ? 1 : 0, p.photo, id);
-    if (old.photo !== p.photo) removeUpload(old.photo);
+    db.prepare("UPDATE products SET name=?,blurb=?,included=?,price=?,bulk_min=?,bulk_pct=?,visible=?,photo=?,photos=?,options=? WHERE id=?")
+      .run(p.name, p.blurb, JSON.stringify(p.included), p.price, p.bulkMin, p.bulkPct, p.visible ? 1 : 0, p.photo, JSON.stringify(p.photos), JSON.stringify(p.options), id);
+    for (const u of old.photos) if (!p.photos.includes(u)) removeUpload(u);
   } else {
     const base = slug(p.name); id = base; let i = 2;
     while (findProduct(id)) id = `${base}-${i++}`;
-    db.prepare("INSERT INTO products(id,name,blurb,included,price,bulk_min,bulk_pct,visible,photo,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)")
-      .run(id, p.name, p.blurb, JSON.stringify(p.included), p.price, p.bulkMin, p.bulkPct, p.visible ? 1 : 0, p.photo, new Date().toISOString());
+    db.prepare("INSERT INTO products(id,name,blurb,included,price,bulk_min,bulk_pct,visible,photo,photos,options,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)")
+      .run(id, p.name, p.blurb, JSON.stringify(p.included), p.price, p.bulkMin, p.bulkPct, p.visible ? 1 : 0, p.photo, JSON.stringify(p.photos), JSON.stringify(p.options), new Date().toISOString());
   }
   res.json({ product: findProduct(id) });
 });
 app.delete("/api/admin/products/:id", requireAdmin, (req, res) => {
   const p = findProduct(req.params.id);
-  if (!p) return res.status(404).json({ error: "That product was already deleted." });
+  if (!p) return res.status(404).json({ error: "That item was already deleted." });
   db.prepare("DELETE FROM products WHERE id=?").run(p.id);
-  removeUpload(p.photo);
+  p.photos.forEach(removeUpload);
   res.json({ ok: true });
 });
 function removeUpload(url) {
   if (!url || !url.startsWith("/uploads/")) return;
   const s = getSetting("season", {});
-  const inUse = s.photo === url || db.prepare("SELECT 1 FROM products WHERE photo=?").get(url);
+  const inUse = s.photo === url || db.prepare("SELECT 1 FROM products WHERE photo=? OR photos LIKE ?").get(url, `%${JSON.stringify(url)}%`);
   if (!inUse) fs.rm(path.join(UPLOADS, path.basename(url)), { force: true }, () => {});
 }
 
