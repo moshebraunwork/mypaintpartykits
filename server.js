@@ -517,7 +517,10 @@ app.patch("/api/admin/messages/:id", requireAdmin, setStatus("messages"));
 
 /* ----- static + pages ----- */
 app.use("/uploads", express.static(UPLOADS, { maxAge: "30d", immutable: true, index: false }));
-app.use(express.static(path.join(__dirname, "public"), { maxAge: "1h", index: false }));
+// The page's script and styles must update as soon as a new version is installed, so browsers
+// always check for a newer copy (a quick "not changed" answer when nothing changed). Images may be kept for an hour.
+app.use(express.static(path.join(__dirname, "public"), { maxAge: "1h", index: false,
+  setHeaders: (res, file) => { if (/\.(js|css)$/.test(file)) res.setHeader("Cache-Control", "no-cache"); } }));
 const page = (req, res) => res.sendFile(path.join(__dirname, "public", "index.html"), { headers: { "Cache-Control": "no-cache" } });
 app.get("/", page);
 app.get("/admin", page);
