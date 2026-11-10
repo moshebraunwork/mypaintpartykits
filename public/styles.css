@@ -434,3 +434,18 @@ footer a{font-weight:600}
   .tabs button{padding:9px 4px;font-size:14px;white-space:normal;line-height:1.2}
 }
 @media (max-width:420px){.admin-top .logo-name{display:none}}
+
+/* per-choice prices */
+.opt-val small{font-weight:600;color:var(--muted);font-size:13px;margin-left:4px}
+.opt-val input:checked+span small{color:var(--brand)}
+.big-price small:first-child{font-family:"DM Sans",sans-serif}
+.card .price small:first-child{margin-right:2px}
+.opr{grid-column:1/-1;display:grid;gap:8px}
+.opr:empty{display:none}
+.opr-head{font-size:14px}
+.opr-head .opt{display:block;margin:2px 0 0}
+.opr-row{display:grid;grid-template-columns:minmax(0,1fr) 120px 80px;gap:10px;align-items:center}
+.opr-name{font-weight:600;overflow-wrap:anywhere}
+.opr-eq{color:var(--muted);font-weight:600;font-size:14.5px;text-align:right}
+.opr-eq::before{content:"= "}
+@media (max-width:640px){.opr-row{grid-template-columns:minmax(0,1fr) 100px 64px}}

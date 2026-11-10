@@ -28,7 +28,20 @@ const money = n => "$" + r2(n).toFixed(2);
 const hasBulk = p => p.bulkMin > 1 && p.bulkPct > 0;
 const bulkUnit = p => r2(p.price * (1 - p.bulkPct / 100));
 const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
-function priceFor(p, q, bulkQty = q) { const bulk = hasBulk(p) && bulkQty >= p.bulkMin, unit = bulk ? bulkUnit(p) : p.price; return { bulk, unit, total: r2(unit * q), full: r2(p.price * q) }; }
+// bulkQty: all of this item in the cart (any options); extra: price change from the chosen options
+function priceFor(p, q, bulkQty = q, extra = 0) {
+  const each = r2(p.price + extra), bulk = hasBulk(p) && bulkQty >= p.bulkMin, unit = bulk ? r2(each * (1 - p.bulkPct / 100)) : each;
+  return { bulk, unit, total: r2(unit * q), full: r2(each * q) };
+}
+const exOf = (g, v) => (g.extras && g.extras[g.values.indexOf(v)]) || 0;
+// price change for a (possibly partial) choice; an unchosen option counts at its cheapest choice
+const extraFor = (p, sel) => (p.options || []).reduce((s, g) => s + (sel && g.values.includes(sel[g.name]) ? exOf(g, sel[g.name]) : Math.min(...g.values.map(v => exOf(g, v)))), 0);
+function priceRange(p) {
+  let lo = p.price, hi = p.price;
+  for (const g of p.options || []) { const ex = g.values.map(v => exOf(g, v)); if (!ex.length) continue; lo += Math.min(...ex); hi += Math.max(...ex); }
+  return { lo: r2(lo), hi: r2(hi) };
+}
+const signed = n => (n < 0 ? "−" : "+") + money(Math.abs(n));
 const findP = id => store && store.products.find(p => p.id === id);
 const photosOf = p => (p.photos && p.photos.length ? p.photos : p.photo ? [p.photo] : []);
 /* options: [{ name: "Color", values: ["Red", "Blue"] }]. A group with one value is chosen automatically. */
@@ -156,7 +169,7 @@ function cartLines() {
 function cartCount() { return cartLines().reduce((s, l) => s + l.qty, 0); }
 function cartTotals() {
   let full = 0, total = 0;
-  cartLines().forEach(l => { const r = priceFor(l.p, l.qty, l.bulkQty); full += r.full; total += r.total; });
+  cartLines().forEach(l => { const r = priceFor(l.p, l.qty, l.bulkQty, extraFor(l.p, l.opts)); full += r.full; total += r.total; });
   return { full: r2(full), total: r2(total), save: r2(full - total) };
 }
 function nudgeText(p, q) {
@@ -239,7 +252,7 @@ function card(p, preview) {
     <button class="ph" ${go} aria-label="View ${esc(p.name)}">${ph ? `<img src="${esc(ph)}" alt="" loading="lazy">` : ""}</button>
     <div class="body">
       <h3><button ${go}>${esc(p.name)}</button></h3>
-      <div class="price">${money(p.price)} <small>each</small></div>
+      <div class="price">${(pr => pr.lo < pr.hi ? `<small>From</small> ${money(pr.lo)}` : `${money(pr.lo)} <small>each</small>`)(priceRange(p))}</div>
       ${hasBulk(p) ? `<span class="deal">${p.bulkPct}% off ${p.bulkMin}+</span>` : ""}
       ${optHint ? `<span class="opt-hint">${optHint}</span>` : ""}
       <div style="height:6px"></div>
@@ -261,9 +274,10 @@ function viewProduct(id) {
   const q = ui.qty[id] || 1, photos = photosOf(p), pi = Math.min(ui.photo[id] || 0, Math.max(0, photos.length - 1)), sel = ui.sel[id] || {};
   const groups = (p.options || []).map((g, gi) => {
     const one = g.values.length === 1, chosen = one ? g.values[0] : sel[g.name];
+    const tag = v => exOf(g, v) ? ` <small>${signed(exOf(g, v))}</small>` : "";
     return `<fieldset class="opt-group">
       <legend class="label">${esc(g.name)}${one ? "" : `${REQ}<span class="opt-chosen">${chosen ? esc(chosen) : "Choose one"}</span>`}</legend>
-      <div class="opt-vals">${g.values.map(v => `<label class="opt-val"><input type="radio" name="og-${gi}" value="${esc(v)}" data-opt-group="${esc(g.name)}" data-pid="${esc(p.id)}" ${chosen === v ? "checked" : ""}><span>${esc(v)}</span></label>`).join("")}</div>
+      <div class="opt-vals">${g.values.map(v => `<label class="opt-val"><input type="radio" name="og-${gi}" value="${esc(v)}" data-opt-group="${esc(g.name)}" data-pid="${esc(p.id)}" ${chosen === v ? "checked" : ""}><span>${esc(v)}${tag(v)}</span></label>`).join("")}</div>
       <span class="err" data-opt-err="${esc(g.name)}"></span></fieldset>`;
   }).join("");
   return shell(`<div class="wrap">
@@ -276,8 +290,8 @@ function viewProduct(id) {
       <div>
         <h1>${esc(p.name)}</h1>
         <p class="lede">${esc(p.blurb)}</p>
-        <div class="big-price">${money(p.price)} <small>each</small></div>
-        ${hasBulk(p) ? `<p class="bulk-line">Buy ${p.bulkMin} or more and pay ${money(bulkUnit(p))} each (${p.bulkPct}% off).</p>` : `<div style="height:20px"></div>`}
+        <div class="big-price" id="bigPrice"></div>
+        ${hasBulk(p) ? `<p class="bulk-line">${priceRange(p).lo < priceRange(p).hi ? `Buy ${p.bulkMin} or more (any mix of options) and save ${p.bulkPct}% on each one.` : `Buy ${p.bulkMin} or more and pay ${money(bulkUnit({ ...p, price: priceRange(p).lo }))} each (${p.bulkPct}% off).`}</p>` : `<div style="height:20px"></div>`}
         ${p.included.length ? `<span class="label">What’s included</span><ul class="incl">${p.included.map(i => `<li>${esc(i)}</li>`).join("")}</ul>` : ""}
         <div class="buy">
           ${groups}
@@ -294,7 +308,9 @@ function viewProduct(id) {
 function updateProduct(id) {
   const p = findP(id); if (!p) return;
   const q = ui.qty[id] || 1, inCart = cart.filter(l => l.id === id).reduce((s, l) => s + l.qty, 0);
-  const r = priceFor(p, q, q + inCart), n = nudgeText(p, q + inCart);
+  const sel = ui.sel[id], ext = extraFor(p, sel), pr = priceRange(p);
+  const r = priceFor(p, q, q + inCart, ext), n = nudgeText(p, q + inCart);
+  document.getElementById("bigPrice").innerHTML = (!fullOpts(p, sel) && pr.lo < pr.hi ? `<small>From</small> ` : "") + `${money(p.price + ext)} <small>each</small>`;
   document.getElementById("plt").innerHTML = (r.bulk ? `<s>${money(r.full)}</s>` : "") + `<b>${money(r.total)}</b>`;
   const el = document.getElementById("pn");
   if (n) { el.hidden = false; el.className = "nudge" + (n.won ? " won" : ""); el.textContent = n.text; } else el.hidden = true;
@@ -314,7 +330,7 @@ function viewCart() {
     </div></div>`);
 }
 function cartItem(l, moreBelow) { // the bulk note shows once, under the last line of that item
-  const r = priceFor(l.p, l.qty, l.bulkQty), n = moreBelow ? null : nudgeText(l.p, l.bulkQty), ph = photosOf(l.p)[0];
+  const r = priceFor(l.p, l.qty, l.bulkQty, extraFor(l.p, l.opts)), n = moreBelow ? null : nudgeText(l.p, l.bulkQty), ph = photosOf(l.p)[0];
   return `<div class="item">
     ${ph ? `<img src="${esc(ph)}" alt="">` : `<span></span>`}
     <div>
@@ -347,7 +363,7 @@ function summaryInner(mode) {
     <div class="sum-row total"><span>Total</span><b>${money(t.total + (d && d.ok ? d.fee : 0))}</b></div>
     <p class="fine">No payment today. We’ll contact you to confirm and arrange ${store.delivery.enabled ? "pickup or delivery" : "pickup"}.</p>
     ${mode === "cart" ? `<button class="btn big block" data-go="checkout">Continue to checkout</button>`
-      : `<div style="display:grid;gap:10px;border-top:1px solid var(--line);padding-top:12px">${cartLines().map(l => { const r = priceFor(l.p, l.qty, l.bulkQty), ph = photosOf(l.p)[0]; return `<div class="mini">${ph ? `<img src="${esc(ph)}" alt="">` : ""}<div>${esc(l.p.name)}${l.opts && Object.keys(l.opts).length ? `<br><span>${esc(optLine(l.opts))}</span>` : ""}<br><span>${l.qty} × ${money(r.unit)}</span></div><b>${money(r.total)}</b></div>`; }).join("")}</div>`}`;
+      : `<div style="display:grid;gap:10px;border-top:1px solid var(--line);padding-top:12px">${cartLines().map(l => { const r = priceFor(l.p, l.qty, l.bulkQty, extraFor(l.p, l.opts)), ph = photosOf(l.p)[0]; return `<div class="mini">${ph ? `<img src="${esc(ph)}" alt="">` : ""}<div>${esc(l.p.name)}${l.opts && Object.keys(l.opts).length ? `<br><span>${esc(optLine(l.opts))}</span>` : ""}<br><span>${l.qty} × ${money(r.unit)}</span></div><b>${money(r.total)}</b></div>`; }).join("")}</div>`}`;
 }
 function refreshSummary(mode) { const el = document.getElementById("sum"); if (el) el.innerHTML = summaryInner(mode); }
 
@@ -587,7 +603,8 @@ function viewEdit() {
           ${d.options.map((g, i) => `<div class="opt-edit">
             <div class="field"><label for="o-n${i}">Option name</label><input class="input" id="o-n${i}" data-oname="${i}" value="${esc(g.name)}" placeholder="${["Color", "Size", "Style"][i] || "Option"}"></div>
             <div class="field"><label for="o-v${i}">Choices <span class="opt">Separate with commas</span></label><input class="input" id="o-v${i}" data-ovals="${i}" value="${esc(g.values.join(", "))}" placeholder="${["Red, Blue, Green", "Small, Medium, Large", "Classic, Glitter"][i] || "Choice 1, Choice 2"}"></div>
-            <button type="button" class="x" data-opt-del="${i}" aria-label="Remove this option">×</button></div>`).join("")}
+            <button type="button" class="x" data-opt-del="${i}" aria-label="Remove this option">×</button>
+            <div class="opr" id="opr-${i}">${oprRows(g, i, d.price)}</div></div>`).join("")}
           <span class="err" data-err="options"></span>
           ${d.options.length < 5 ? `<button type="button" class="btn line sm" data-opt-add style="justify-self:start">+ Add an option${d.options.length ? "" : " (like color or size)"}</button>` : ""}
         </div>
@@ -601,6 +618,13 @@ function viewEdit() {
       <div class="side"><span class="label">How customers will see it</span><div id="preview" style="max-width:300px"></div></div>
     </div></main>`;
 }
+function oprRows(g, i, base) {
+  if (!g.values.length) return "";
+  return `<div class="opr-head"><b>Price for each choice</b> <span class="opt">Leave empty to use the item’s price. Type an amount to add, or a minus to take off (like -1).</span></div>
+    ${g.values.map((v, j) => { const ex = (g.extras && g.extras[j]) || 0; return `<div class="opr-row"><span class="opr-name">${esc(v)}</span>
+      <div class="adorn pre"><span>$</span><input class="input" data-oex="${i}" data-val="${esc(v)}" value="${ex ? ex : ""}" placeholder="0" autocomplete="off" aria-label="Price change for ${esc(v)}"></div>
+      <span class="opr-eq" data-eq="${i}:${j}">${money(base + ex)}</span></div>`; }).join("")}`;
+}
 function readDraft() {
   const f = document.getElementById("edit"); if (!f) return;
   const d = admin.draft, v = n => f.elements[n].value;
@@ -612,12 +636,17 @@ function readDraft() {
   d.visible = f.elements.visible.checked;
   d.options = d.options.map((g, i) => {
     const n = f.querySelector(`[data-oname="${i}"]`), v = f.querySelector(`[data-ovals="${i}"]`);
-    return n && v ? { name: n.value.trim(), values: v.value.split(",").map(x => x.trim()).filter(Boolean) } : g;
+    if (!n || !v) return g;
+    const values = [...new Set(v.value.split(",").map(x => x.trim()).filter(Boolean))];
+    const ex = Object.fromEntries(g.values.map((x, j) => [x, (g.extras && g.extras[j]) || 0]));
+    f.querySelectorAll(`[data-oex="${i}"]`).forEach(inp => { const x = parseFloat(inp.value.replace(/[−–]/g, "-").replace(/[^\d.-]/g, "")); ex[inp.dataset.val] = Number.isFinite(x) ? r2(x) : 0; });
+    return { name: n.value.trim(), values, extras: values.map(x => ex[x] || 0) };
   });
   d.photo = d.photos[0] || "";
 }
 function updatePreview() {
   readDraft(); const d = admin.draft;
+  document.querySelectorAll("[data-eq]").forEach(el => { const [i, j] = el.dataset.eq.split(":").map(Number), g = d.options[i]; if (g) el.textContent = money(d.price + ((g.extras && g.extras[j]) || 0)); });
   document.getElementById("preview").innerHTML = card({ ...d, name: d.name || "Product name" }, true);
   const ex = document.getElementById("example");
   if (d.price > 0 && hasBulk(d)) ex.textContent = `Customers pay ${money(d.price)} each, or ${money(bulkUnit(d))} each when they order ${d.bulkMin} or more${needsChoice(d) ? " (any mix of options counts)" : ""}. ${d.bulkMin} would cost ${money(bulkUnit(d) * d.bulkMin)}.`;
@@ -629,6 +658,7 @@ async function saveProduct(form) {
   if (!d.name.trim()) errs.name = "Give the item a name.";
   if (d.options.some(g => g.values.length && !g.name)) errs.options = "Give each option a name, like Color or Size.";
   else if (d.options.some(g => g.name && !g.values.length)) errs.options = "Add at least one choice to each option, or remove it.";
+  else if (d.price > 0 && !(priceRange(d).lo > 0)) errs.options = "A price change makes some choices cost $0 or less. Lower the minus amount.";
   if (!(d.price > 0)) errs.price = "Enter a price, like 7.99.";
   if (showErrs(form, errs) || admin.busy) return;
   const btn = form.querySelector('button[type="submit"]'); admin.busy = true; setBusy(btn, true, "Saving…");
@@ -975,6 +1005,7 @@ document.addEventListener("input", e => {
   if ("qty" in t.dataset && t.dataset.ctx === "pq") { const n = parseInt(t.value); if (n >= 1) setQty("pq", t.dataset.id, n); }
   if (t.id === "c-zip") checkZip(t.value.trim());
   if (t.closest("#edit") && t.type !== "file") updatePreview();
+  if (t.dataset.ovals !== undefined) { const i = Number(t.dataset.ovals), el = document.getElementById(`opr-${i}`); if (el) el.innerHTML = oprRows(admin.draft.options[i], i, admin.draft.price); }
   if (t.closest("#season") && t.type !== "file") updateSeasonPreview();
   if (t.dataset.ring !== undefined) { const v = parseFloat(t.value); admin.ddraft.rings[Number(t.dataset.ring)][t.dataset.k] = Number.isFinite(v) ? v : 0; }
   if (t.dataset.zone) { const z = admin.ddraft.zones[t.dataset.zone]; const v = parseFloat(t.value); if (z && v >= 0) { z.fee = r2(v); z.manual = true; } }
@@ -985,6 +1016,7 @@ document.addEventListener("change", async e => {
   if (t.dataset.optGroup && t.dataset.pid) {
     const sel = ui.sel[t.dataset.pid] ||= {}; sel[t.dataset.optGroup] = t.value;
     const fs = t.closest(".opt-group"); fs.querySelector(".opt-chosen").textContent = t.value; fs.querySelector(".err").textContent = "";
+    updateProduct(t.dataset.pid);
   }
   if (t.name === "method") {
     ui.method = t.value; document.getElementById("addr").hidden = t.value !== "delivery";

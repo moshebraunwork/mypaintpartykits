@@ -76,20 +76,25 @@ function rowToProduct(r) {
   let photos = JSON.parse(r.photos || "[]");
   if (!photos.length && r.photo) photos = [r.photo];
   return { id: r.id, name: r.name, blurb: r.blurb, included: JSON.parse(r.included), price: r.price,
-    bulkMin: r.bulk_min, bulkPct: r.bulk_pct, visible: !!r.visible, photo: photos[0] || "", photos, options: JSON.parse(r.options || "[]") };
+    bulkMin: r.bulk_min, bulkPct: r.bulk_pct, visible: !!r.visible, photo: photos[0] || "", photos,
+    options: JSON.parse(r.options || "[]").map(g => ({ ...g, extras: g.values.map((_, i) => num(g.extras && g.extras[i]) || 0) })) };
 }
-// options look like [{ name: "Color", values: ["Red", "Blue"] }]
+// options look like [{ name: "Size", values: ["Small", "Large"], extras: [0, 3] }]
+// extras = how much each choice adds to (or, if negative, takes off) the item's price
 function cleanOptions(list) {
   const out = [], seen = new Set();
   for (const g of Array.isArray(list) ? list : []) {
     const name = str(g && g.name, 40), key = name.toLowerCase();
     if (!name || seen.has(key)) continue;
-    const vals = [], vseen = new Set();
-    for (const v of Array.isArray(g.values) ? g.values : []) {
-      const t = str(v, 40); if (t && !vseen.has(t.toLowerCase())) { vseen.add(t.toLowerCase()); vals.push(t); }
-    }
+    const vals = [], extras = [], vseen = new Set();
+    (Array.isArray(g.values) ? g.values : []).forEach((v, i) => {
+      const t = str(v, 40); if (!t || vseen.has(t.toLowerCase())) return;
+      vseen.add(t.toLowerCase()); vals.push(t);
+      const e = r2(num(Array.isArray(g.extras) ? g.extras[i] : 0));
+      extras.push(Number.isFinite(e) ? Math.max(-100000, Math.min(100000, e)) : 0);
+    });
     if (!vals.length) continue;
-    seen.add(key); out.push({ name, values: vals.slice(0, 30) });
+    seen.add(key); out.push({ name, values: vals.slice(0, 30), extras: extras.slice(0, 30) });
   }
   return out.slice(0, 5);
 }
@@ -99,18 +104,20 @@ function pickOptions(p, chosen) {
   for (const g of p.options) {
     const v = g.values.length === 1 ? g.values[0] : g.values.find(x => x === c[g.name]);
     if (!v) return { error: `Choose a ${g.name.toLowerCase()} for ${p.name}.` };
-    picked.push({ name: g.name, value: v });
+    picked.push({ name: g.name, value: v, extra: g.extras[g.values.indexOf(v)] || 0 });
   }
   return { picked };
 }
 const optsText = opts => (opts || []).map(o => `${o.name}: ${o.value}`).join(", ");
+const lowestPrice = p => r2(p.price + p.options.reduce((s, g) => s + Math.min(...g.extras), 0));
 const allProducts = () => db.prepare("SELECT * FROM products ORDER BY created_at").all().map(rowToProduct);
 const findProduct = id => rowToProduct(db.prepare("SELECT * FROM products WHERE id=?").get(id));
 const hasBulk = p => p.bulkMin > 1 && p.bulkPct > 0;
-function priceFor(p, q, bulkQty = q) { // bulkQty: all of this item in the order, across colors/sizes
-  const bulk = hasBulk(p) && bulkQty >= p.bulkMin;
-  const unit = bulk ? r2(p.price * (1 - p.bulkPct / 100)) : p.price;
-  return { bulk, unit, total: r2(unit * q), full: r2(p.price * q) };
+// bulkQty: all of this item in the order, across colors/sizes; extra: price change from the chosen options
+function priceFor(p, q, bulkQty = q, extra = 0) {
+  const each = r2(p.price + extra), bulk = hasBulk(p) && bulkQty >= p.bulkMin;
+  const unit = bulk ? r2(each * (1 - p.bulkPct / 100)) : each;
+  return { bulk, unit, total: r2(unit * q), full: r2(each * q) };
 }
 function milesBetween(a, b) {
   const R = 3958.8, rad = x => x * Math.PI / 180;
@@ -196,8 +203,8 @@ function buildOrder(body) {
     perItem[p.id] = (perItem[p.id] || 0) + qty;
   }
   const items = lines.map(({ p, qty, opts }) => {
-    const r = priceFor(p, qty, perItem[p.id]);
-    return { id: p.id, name: p.name, opts, qty, unit: r.unit, total: r.total, full: r.full, bulk: r.bulk, pct: p.bulkPct };
+    const r = priceFor(p, qty, perItem[p.id], opts.reduce((s, o) => s + o.extra, 0));
+    return { id: p.id, name: p.name, opts: opts.map(({ name, value }) => ({ name, value })), qty, unit: r.unit, total: r.total, full: r.full, bulk: r.bulk, pct: p.bulkPct };
   });
   if (!items.length && !errors.items) errors.items = "Your cart is empty or an item is no longer available.";
   const subtotal = r2(items.reduce((s, i) => s + i.total, 0)), full = r2(items.reduce((s, i) => s + i.full, 0));
@@ -401,6 +408,7 @@ app.post("/api/admin/products", requireAdmin, (req, res) => {
   const errors = {};
   if (!p.name) errors.name = "Give the item a name.";
   if (!(p.price > 0 && p.price < 100000)) errors.price = "Enter a price, like 7.99.";
+  else if (!(lowestPrice(p) > 0)) errors.options = "A price change makes some choices cost $0 or less. Lower the minus amount.";
   if (Object.keys(errors).length) return res.status(400).json({ error: "Please fix the highlighted fields.", errors });
   let id = typeof b.id === "string" && findProduct(b.id) ? b.id : null;
   if (id) {

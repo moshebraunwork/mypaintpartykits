@@ -163,7 +163,7 @@ Open **https://mypaintpartykits.com**. You should see the shop with a padlock.
 Go to **https://mypaintpartykits.com/admin** and sign in with `sales@mypaintpartykits.com` and the password from step 3.
 
 1. **Delivery** tab: enter your home ZIP, adjust the distances and prices, tap **Generate ZIP list**, review the list, then tap **Save delivery settings**. Until this is saved, customers only see pickup.
-2. **Items** tab: check the Chanukah kit's price and discount. When editing an item you can add up to 10 photos (the first is the main one) and options such as Color or Size. If an option has more than one choice, customers must pick one before adding to cart, and their choice shows in the order, the email and the Orders tab. The bulk discount counts all options of an item together.
+2. **Items** tab: check the Chanukah kit's price and discount. When editing an item you can add up to 10 photos (the first is the main one) and options such as Color or Size. If an option has more than one choice, customers must pick one before adding to cart, and their choice shows in the order, the email and the Orders tab. Each choice can have its own price: type an amount to add (like 3 for +$3) or take off (like -1); the editor shows what customers will pay for each choice. The bulk discount counts all options of an item together.
 3. **Seasonal look** tab: adjust the banner if you like.
 
 ---
