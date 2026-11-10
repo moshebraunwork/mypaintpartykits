@@ -38,13 +38,14 @@ CREATE TABLE IF NOT EXISTS events (
   source TEXT NOT NULL DEFAULT '', device TEXT NOT NULL DEFAULT '');
 CREATE INDEX IF NOT EXISTS events_at ON events(at);
 `);
-// added later: several photos and choosable options (color, size…) per item
+// added later: several photos per item, and "choices" (sub-listings such as sizes or colors)
 const cols = db.prepare("PRAGMA table_info(products)").all().map(c => c.name);
 if (!cols.includes("photos")) {
   db.exec("ALTER TABLE products ADD COLUMN photos TEXT NOT NULL DEFAULT '[]'");
   db.exec("UPDATE products SET photos = json_array(photo) WHERE photo != ''");
 }
-if (!cols.includes("options")) db.exec("ALTER TABLE products ADD COLUMN options TEXT NOT NULL DEFAULT '[]'");
+if (!cols.includes("variants")) db.exec("ALTER TABLE products ADD COLUMN variants TEXT NOT NULL DEFAULT '[]'");
+if (!cols.includes("choose_label")) db.exec("ALTER TABLE products ADD COLUMN choose_label TEXT NOT NULL DEFAULT ''");
 const getSetting = (k, fallback) => { const r = db.prepare("SELECT value FROM settings WHERE key=?").get(k); return r ? JSON.parse(r.value) : fallback; };
 const setSetting = (k, v) => db.prepare("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(k, JSON.stringify(v));
 
@@ -77,45 +78,37 @@ function rowToProduct(r) {
   if (!photos.length && r.photo) photos = [r.photo];
   return { id: r.id, name: r.name, blurb: r.blurb, included: JSON.parse(r.included), price: r.price,
     bulkMin: r.bulk_min, bulkPct: r.bulk_pct, visible: !!r.visible, photo: photos[0] || "", photos,
-    options: JSON.parse(r.options || "[]").map(g => ({ ...g, extras: g.values.map((_, i) => num(g.extras && g.extras[i]) || 0) })) };
+    chooseLabel: r.choose_label || "", variants: JSON.parse(r.variants || "[]").map(v => {
+      const ph = Array.isArray(v.photos) ? v.photos : v.photo ? [v.photo] : [];
+      return { id: v.id, name: v.name, price: v.price, photos: ph, photo: ph[0] || "", blurb: v.blurb || v.note || "", included: v.included || [], soldOut: !!v.soldOut };
+    }) };
 }
-// options look like [{ name: "Size", values: ["Small", "Large"], extras: [0, 3] }]
-// extras = how much each choice adds to (or, if negative, takes off) the item's price
-function cleanOptions(list) {
-  const out = [], seen = new Set();
-  for (const g of Array.isArray(list) ? list : []) {
-    const name = str(g && g.name, 40), key = name.toLowerCase();
-    if (!name || seen.has(key)) continue;
-    const vals = [], extras = [], vseen = new Set();
-    (Array.isArray(g.values) ? g.values : []).forEach((v, i) => {
-      const t = str(v, 40); if (!t || vseen.has(t.toLowerCase())) return;
-      vseen.add(t.toLowerCase()); vals.push(t);
-      const e = r2(num(Array.isArray(g.extras) ? g.extras[i] : 0));
-      extras.push(Number.isFinite(e) ? Math.max(-100000, Math.min(100000, e)) : 0);
-    });
-    if (!vals.length) continue;
-    seen.add(key); out.push({ name, values: vals.slice(0, 30), extras: extras.slice(0, 30) });
+/* Sub-items: complete listings inside an item (a size, a color, or both, e.g. "Large – Gold").
+   [{ id, name, price, photos, blurb, included, soldOut }]. price null = use the item's price.
+   If an item has sub-items, customers must pick one. */
+function cleanVariants(list) {
+  const out = [], ids = new Set();
+  for (const v of Array.isArray(list) ? list.slice(0, 60) : []) {
+    if (!v || typeof v !== "object") continue;
+    const name = str(v.name, 80), price = r2(num(v.price));
+    const photos = [...new Set((Array.isArray(v.photos) ? v.photos : [v.photo]).map(safeUrl).filter(Boolean))].slice(0, 10);
+    const included = (Array.isArray(v.included) ? v.included : []).map(x => str(x, 120)).filter(Boolean).slice(0, 30);
+    let id = typeof v.id === "string" && /^[a-z0-9]{4,16}$/.test(v.id) && !ids.has(v.id) ? v.id : "";
+    while (!id || ids.has(id)) id = crypto.randomBytes(4).toString("hex");
+    ids.add(id);
+    out.push({ id, name, price: price > 0 && price < 100000 ? price : null, photos, photo: photos[0] || "",
+      blurb: str(v.blurb, 1500), included, soldOut: !!v.soldOut });
   }
-  return out.slice(0, 5);
+  return out;
 }
-// returns the customer's choice for each option group, or an error message
-function pickOptions(p, chosen) {
-  const c = chosen && typeof chosen === "object" ? chosen : {}, picked = [];
-  for (const g of p.options) {
-    const v = g.values.length === 1 ? g.values[0] : g.values.find(x => x === c[g.name]);
-    if (!v) return { error: `Choose a ${g.name.toLowerCase()} for ${p.name}.` };
-    picked.push({ name: g.name, value: v, extra: g.extras[g.values.indexOf(v)] || 0 });
-  }
-  return { picked };
-}
-const optsText = opts => (opts || []).map(o => `${o.name}: ${o.value}`).join(", ");
-const lowestPrice = p => r2(p.price + p.options.reduce((s, g) => s + Math.min(...g.extras), 0));
+const priceOf = (p, v) => (v && v.price > 0 ? v.price : p.price);
+const variantPhotos = p => p.variants.flatMap(v => v.photos);
 const allProducts = () => db.prepare("SELECT * FROM products ORDER BY created_at").all().map(rowToProduct);
 const findProduct = id => rowToProduct(db.prepare("SELECT * FROM products WHERE id=?").get(id));
 const hasBulk = p => p.bulkMin > 1 && p.bulkPct > 0;
-// bulkQty: all of this item in the order, across colors/sizes; extra: price change from the chosen options
-function priceFor(p, q, bulkQty = q, extra = 0) {
-  const each = r2(p.price + extra), bulk = hasBulk(p) && bulkQty >= p.bulkMin;
+// bulkQty: all of this item in the order, across choices; each: price of one before any bulk discount
+function priceFor(p, q, bulkQty = q, each = p.price) {
+  const bulk = hasBulk(p) && bulkQty >= p.bulkMin;
   const unit = bulk ? r2(each * (1 - p.bulkPct / 100)) : each;
   return { bulk, unit, total: r2(unit * q), full: r2(each * q) };
 }
@@ -196,15 +189,19 @@ function buildOrder(body) {
     const p = findProduct(String(it.id || ""));
     const qty = Math.floor(num(it.qty));
     if (!p || !p.visible || !(qty >= 1 && qty <= 999)) continue;
-    const { picked, error } = pickOptions(p, it.opts);
-    if (error) { errors.items = error; continue; }
-    const same = lines.find(l => l.p.id === p.id && optsText(l.opts) === optsText(picked));
-    if (same) same.qty = Math.min(999, same.qty + qty); else lines.push({ p, qty, opts: picked });
+    let v = null;
+    if (p.variants.length) {
+      v = p.variants.find(x => x.id === it.v);
+      if (!v) { errors.items = `Choose a ${(p.chooseLabel || "option").toLowerCase()} for ${p.name}.`; continue; }
+      if (v.soldOut) { errors.items = `${p.name} (${v.name}) is sold out. Please remove it from your cart.`; continue; }
+    }
+    const same = lines.find(l => l.p.id === p.id && l.v === v);
+    if (same) same.qty = Math.min(999, same.qty + qty); else lines.push({ p, qty, v });
     perItem[p.id] = (perItem[p.id] || 0) + qty;
   }
-  const items = lines.map(({ p, qty, opts }) => {
-    const r = priceFor(p, qty, perItem[p.id], opts.reduce((s, o) => s + o.extra, 0));
-    return { id: p.id, name: p.name, opts: opts.map(({ name, value }) => ({ name, value })), qty, unit: r.unit, total: r.total, full: r.full, bulk: r.bulk, pct: p.bulkPct };
+  const items = lines.map(({ p, qty, v }) => {
+    const r = priceFor(p, qty, perItem[p.id], priceOf(p, v));
+    return { id: p.id, name: p.name, ...(v ? { variant: v.name, variantId: v.id, label: p.chooseLabel } : {}), qty, unit: r.unit, total: r.total, full: r.full, bulk: r.bulk, pct: p.bulkPct };
   });
   if (!items.length && !errors.items) errors.items = "Your cart is empty or an item is no longer available.";
   const subtotal = r2(items.reduce((s, i) => s + i.total, 0)), full = r2(items.reduce((s, i) => s + i.full, 0));
@@ -231,7 +228,7 @@ function orderEmail(o) {
     subject: `New order ${o.id}: ${o.items.reduce((s, i) => s + i.qty, 0)} items, ${money(o.total)}`,
     text: `New order request ${o.id}
 
-${o.items.map(i => `• ${i.qty} × ${i.name}${i.opts && i.opts.length ? ` (${optsText(i.opts)})` : ""} @ ${money(i.unit)}${i.bulk ? ` (${i.pct}% bulk)` : ""} = ${money(i.total)}`).join("\n")}
+${o.items.map(i => `• ${i.qty} × ${i.name}${i.variant ? ` (${i.label ? i.label + ": " : ""}${i.variant})` : ""} @ ${money(i.unit)}${i.bulk ? ` (${i.pct}% bulk)` : ""} = ${money(i.total)}`).join("\n")}
 ${o.save > 0 ? `Bulk savings: −${money(o.save)}\n` : ""}Subtotal: ${money(o.subtotal)}
 ${o.method === "delivery" ? `Delivery (estimate): ${o.delivery ? money(o.delivery) : "Free"}\n` : ""}Total: ${money(o.total)}
 
@@ -402,25 +399,30 @@ app.post("/api/admin/products", requireAdmin, (req, res) => {
     price: r2(num(b.price)), bulkMin: Math.max(0, Math.floor(num(b.bulkMin) || 0)),
     bulkPct: Math.min(90, Math.max(0, num(b.bulkPct) || 0)), visible: !!b.visible,
     photos: [...new Set((Array.isArray(b.photos) ? b.photos : [b.photo]).map(safeUrl).filter(Boolean))].slice(0, 10),
-    options: cleanOptions(b.options)
+    variants: cleanVariants(b.variants), chooseLabel: str(b.chooseLabel, 30)
   };
   p.photo = p.photos[0] || "";
+  if (!(p.price > 0 && p.price < 100000)) p.price = 0;
   const errors = {};
   if (!p.name) errors.name = "Give the item a name.";
-  if (!(p.price > 0 && p.price < 100000)) errors.price = "Enter a price, like 7.99.";
-  else if (!(lowestPrice(p) > 0)) errors.options = "A price change makes some choices cost $0 or less. Lower the minus amount.";
+  const names = p.variants.map(v => v.name.toLowerCase());
+  if (p.variants.some(v => !v.name)) errors.variants = "Every sub-item needs a name.";
+  else if (new Set(names).size < names.length) errors.variants = "Two sub-items have the same name.";
+  else if (!p.variants.length && !(p.price > 0)) errors.price = "Enter a price, like 7.99.";
+  else if (p.variants.some(v => !(priceOf(p, v) > 0))) errors.variants = "Give each sub-item a price, or set one price for the whole item.";
   if (Object.keys(errors).length) return res.status(400).json({ error: "Please fix the highlighted fields.", errors });
   let id = typeof b.id === "string" && findProduct(b.id) ? b.id : null;
   if (id) {
     const old = findProduct(id);
-    db.prepare("UPDATE products SET name=?,blurb=?,included=?,price=?,bulk_min=?,bulk_pct=?,visible=?,photo=?,photos=?,options=? WHERE id=?")
-      .run(p.name, p.blurb, JSON.stringify(p.included), p.price, p.bulkMin, p.bulkPct, p.visible ? 1 : 0, p.photo, JSON.stringify(p.photos), JSON.stringify(p.options), id);
-    for (const u of old.photos) if (!p.photos.includes(u)) removeUpload(u);
+    db.prepare("UPDATE products SET name=?,blurb=?,included=?,price=?,bulk_min=?,bulk_pct=?,visible=?,photo=?,photos=?,variants=?,choose_label=? WHERE id=?")
+      .run(p.name, p.blurb, JSON.stringify(p.included), p.price, p.bulkMin, p.bulkPct, p.visible ? 1 : 0, p.photo, JSON.stringify(p.photos), JSON.stringify(p.variants), p.chooseLabel, id);
+    const keep = [...p.photos, ...variantPhotos(p)];
+    for (const u of [...old.photos, ...variantPhotos(old)]) if (!keep.includes(u)) removeUpload(u);
   } else {
     const base = slug(p.name); id = base; let i = 2;
     while (findProduct(id)) id = `${base}-${i++}`;
-    db.prepare("INSERT INTO products(id,name,blurb,included,price,bulk_min,bulk_pct,visible,photo,photos,options,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)")
-      .run(id, p.name, p.blurb, JSON.stringify(p.included), p.price, p.bulkMin, p.bulkPct, p.visible ? 1 : 0, p.photo, JSON.stringify(p.photos), JSON.stringify(p.options), new Date().toISOString());
+    db.prepare("INSERT INTO products(id,name,blurb,included,price,bulk_min,bulk_pct,visible,photo,photos,variants,choose_label,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)")
+      .run(id, p.name, p.blurb, JSON.stringify(p.included), p.price, p.bulkMin, p.bulkPct, p.visible ? 1 : 0, p.photo, JSON.stringify(p.photos), JSON.stringify(p.variants), p.chooseLabel, new Date().toISOString());
   }
   res.json({ product: findProduct(id) });
 });
@@ -428,13 +430,13 @@ app.delete("/api/admin/products/:id", requireAdmin, (req, res) => {
   const p = findProduct(req.params.id);
   if (!p) return res.status(404).json({ error: "That item was already deleted." });
   db.prepare("DELETE FROM products WHERE id=?").run(p.id);
-  p.photos.forEach(removeUpload);
+  [...p.photos, ...variantPhotos(p)].forEach(removeUpload);
   res.json({ ok: true });
 });
 function removeUpload(url) {
   if (!url || !url.startsWith("/uploads/")) return;
   const s = getSetting("season", {});
-  const inUse = s.photo === url || db.prepare("SELECT 1 FROM products WHERE photo=? OR photos LIKE ?").get(url, `%${JSON.stringify(url)}%`);
+  const inUse = s.photo === url || db.prepare("SELECT 1 FROM products WHERE photo=? OR photos LIKE ? OR variants LIKE ?").get(url, `%${JSON.stringify(url)}%`, `%${JSON.stringify(url)}%`);
   if (!inUse) fs.rm(path.join(UPLOADS, path.basename(url)), { force: true }, () => {});
 }
 

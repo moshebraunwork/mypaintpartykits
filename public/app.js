@@ -28,34 +28,26 @@ const money = n => "$" + r2(n).toFixed(2);
 const hasBulk = p => p.bulkMin > 1 && p.bulkPct > 0;
 const bulkUnit = p => r2(p.price * (1 - p.bulkPct / 100));
 const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
-// bulkQty: all of this item in the cart (any options); extra: price change from the chosen options
-function priceFor(p, q, bulkQty = q, extra = 0) {
-  const each = r2(p.price + extra), bulk = hasBulk(p) && bulkQty >= p.bulkMin, unit = bulk ? r2(each * (1 - p.bulkPct / 100)) : each;
+// bulkQty: all of this item in the cart (any choice); each: price of one before any bulk discount
+function priceFor(p, q, bulkQty = q, each = p.price) {
+  const bulk = hasBulk(p) && bulkQty >= p.bulkMin, unit = bulk ? r2(each * (1 - p.bulkPct / 100)) : each;
   return { bulk, unit, total: r2(unit * q), full: r2(each * q) };
 }
-const exOf = (g, v) => (g.extras && g.extras[g.values.indexOf(v)]) || 0;
-// price change for a (possibly partial) choice; an unchosen option counts at its cheapest choice
-const extraFor = (p, sel) => (p.options || []).reduce((s, g) => s + (sel && g.values.includes(sel[g.name]) ? exOf(g, sel[g.name]) : Math.min(...g.values.map(v => exOf(g, v)))), 0);
-function priceRange(p) {
-  let lo = p.price, hi = p.price;
-  for (const g of p.options || []) { const ex = g.values.map(v => exOf(g, v)); if (!ex.length) continue; lo += Math.min(...ex); hi += Math.max(...ex); }
-  return { lo: r2(lo), hi: r2(hi) };
-}
-const signed = n => (n < 0 ? "−" : "+") + money(Math.abs(n));
 const findP = id => store && store.products.find(p => p.id === id);
 const photosOf = p => (p.photos && p.photos.length ? p.photos : p.photo ? [p.photo] : []);
-/* options: [{ name: "Color", values: ["Red", "Blue"] }]. A group with one value is chosen automatically. */
-const needsChoice = p => (p.options || []).some(g => g.values.length > 1);
-function fullOpts(p, sel) { // the complete choice in the item's option order, or null if something isn't chosen yet
-  const o = {};
-  for (const g of p.options || []) {
-    const v = g.values.length === 1 ? g.values[0] : (sel && g.values.includes(sel[g.name]) ? sel[g.name] : null);
-    if (!v) return null; o[g.name] = v;
-  }
-  return o;
+/* Choices ("sub-listings"): p.variants = [{ id, name, price, photo, note, soldOut }].
+   A choice without its own price uses the item's price. Items with choices need one picked. */
+const hasChoices = p => (p.variants || []).length > 0;
+const choiceOf = (p, vid) => (p.variants || []).find(v => v.id === vid) || null;
+const priceOf = (p, v) => (v && v.price > 0 ? v.price : p.price);
+const chooseWord = p => (p.chooseLabel || "option").trim().toLowerCase();
+function priceRange(p) {
+  if (!hasChoices(p)) return { lo: p.price, hi: p.price };
+  const open = p.variants.filter(v => !v.soldOut), list = (open.length ? open : p.variants).map(v => priceOf(p, v));
+  return { lo: Math.min(...list), hi: Math.max(...list) };
 }
-const optLine = opts => Object.entries(opts || {}).map(([k, v]) => `${k}: ${v}`).join(" · ");
-const lineKey = l => l.id + "|" + JSON.stringify(l.opts || {});
+const choiceText = (label, name) => name ? (label ? `${label}: ${name}` : name) : "";
+const lineKey = l => l.id + "|" + (l.v || "");
 const itemRoute = r => r.startsWith("item-") ? r.slice(5) : r.startsWith("kit-") ? r.slice(4) : null; // old "kit-" links keep working
 const REQ = `<span class="req" aria-hidden="true">*</span>`;
 const REQ_NOTE = `<p class="fine" style="margin-top:-6px">Fields marked <span class="req" style="margin:0">*</span> are required.</p>`;
@@ -163,24 +155,24 @@ const CHECK = `<svg width="34" height="34" viewBox="0 0 24 24" fill="none" strok
 function cartLines() {
   const lines = cart.map(l => ({ ...l, key: lineKey(l), p: findP(l.id) })).filter(l => l.p), per = {};
   lines.forEach(l => per[l.id] = (per[l.id] || 0) + l.qty);
-  lines.forEach(l => l.bulkQty = per[l.id]); // bulk discount counts every color/size of the same item together
+  lines.forEach(l => { l.bulkQty = per[l.id]; l.choice = choiceOf(l.p, l.v); l.each = priceOf(l.p, l.choice); }); // bulk counts every choice of an item together
   return lines;
 }
 function cartCount() { return cartLines().reduce((s, l) => s + l.qty, 0); }
 function cartTotals() {
   let full = 0, total = 0;
-  cartLines().forEach(l => { const r = priceFor(l.p, l.qty, l.bulkQty, extraFor(l.p, l.opts)); full += r.full; total += r.total; });
+  cartLines().forEach(l => { const r = priceFor(l.p, l.qty, l.bulkQty, l.each); full += r.full; total += r.total; });
   return { full: r2(full), total: r2(total), save: r2(full - total) };
 }
 function nudgeText(p, q) {
   if (!hasBulk(p)) return null;
-  const any = needsChoice(p) ? " (any mix of options)" : "";
+  const any = hasChoices(p) ? " (any mix)" : "";
   if (q >= p.bulkMin) return { won: true, text: `Bulk price unlocked: ${p.bulkPct}% off each one` };
   const left = p.bulkMin - q; return { won: false, text: `Add ${left} more${any} to get ${p.bulkPct}% off each one` };
 }
-function addToCart(id, qty, opts) {
-  const key = lineKey({ id, opts }), l = cart.find(x => lineKey(x) === key);
-  if (l) l.qty = Math.min(999, l.qty + qty); else cart.push({ id, qty, opts });
+function addToCart(id, qty, v) {
+  const key = lineKey({ id, v }), l = cart.find(x => lineKey(x) === key);
+  if (l) l.qty = Math.min(999, l.qty + qty); else cart.push(v ? { id, qty, v } : { id, qty });
   saveCart(); track("add_to_cart", { product: id });
   const btn = document.getElementById("cartBtn");
   if (btn) { btn.querySelector(".cart-count").textContent = cartCount(); btn.classList.remove("bump"); void btn.offsetWidth; btn.classList.add("bump"); }
@@ -246,8 +238,10 @@ function viewHome() {
   </section>`);
 }
 function card(p, preview) {
-  const go = preview ? `tabindex="-1"` : `data-go="item-${esc(p.id)}"`, ph = photosOf(p)[0], choose = needsChoice(p);
-  const optHint = (p.options || []).filter(g => g.values.length > 1).map(g => `${g.values.length} ${esc(g.name.toLowerCase())} choices`).join(" · ");
+  const go = preview ? `tabindex="-1"` : `data-go="item-${esc(p.id)}"`, choose = hasChoices(p);
+  const ph = photosOf(p)[0] || (p.variants || []).map(v => v.photo).find(Boolean);
+  const n = (p.variants || []).length, word = p.chooseLabel ? chooseWord(p) + (n === 1 ? "" : /s$/.test(chooseWord(p)) ? "" : "s") : (n === 1 ? "choice" : "choices");
+  const optHint = choose ? `${n} ${esc(word)}` : "";
   return `<article class="card">
     <button class="ph" ${go} aria-label="View ${esc(p.name)}">${ph ? `<img src="${esc(ph)}" alt="" loading="lazy">` : ""}</button>
     <div class="body">
@@ -256,7 +250,7 @@ function card(p, preview) {
       ${hasBulk(p) ? `<span class="deal">${p.bulkPct}% off ${p.bulkMin}+</span>` : ""}
       ${optHint ? `<span class="opt-hint">${optHint}</span>` : ""}
       <div style="height:6px"></div>
-      ${choose ? `<button class="btn soft block add" ${go}>Choose options</button>`
+      ${choose ? `<button class="btn soft block add" ${go}>Choose${p.chooseLabel ? " " + esc(chooseWord(p)) : ""}</button>`
         : `<button class="btn soft block add" ${preview ? `tabindex="-1"` : `data-add="${esc(p.id)}"`}>Add to cart</button>`}
     </div></article>`;
 }
@@ -271,30 +265,36 @@ function stepper(ctx, q, id, sm) {
 function viewProduct(id) {
   const p = findP(id);
   if (!p) return shell(`<div class="wrap"><div class="empty-state" style="margin-top:30px"><h2>This item isn’t available</h2><p>It may have sold out or been removed.</p><button class="btn" data-go="">See all items</button></div></div>`);
-  const q = ui.qty[id] || 1, photos = photosOf(p), pi = Math.min(ui.photo[id] || 0, Math.max(0, photos.length - 1)), sel = ui.sel[id] || {};
-  const groups = (p.options || []).map((g, gi) => {
-    const one = g.values.length === 1, chosen = one ? g.values[0] : sel[g.name];
-    const tag = v => exOf(g, v) ? ` <small>${signed(exOf(g, v))}</small>` : "";
-    return `<fieldset class="opt-group">
-      <legend class="label">${esc(g.name)}${one ? "" : `${REQ}<span class="opt-chosen">${chosen ? esc(chosen) : "Choose one"}</span>`}</legend>
-      <div class="opt-vals">${g.values.map(v => `<label class="opt-val"><input type="radio" name="og-${gi}" value="${esc(v)}" data-opt-group="${esc(g.name)}" data-pid="${esc(p.id)}" ${chosen === v ? "checked" : ""}><span>${esc(v)}${tag(v)}</span></label>`).join("")}</div>
-      <span class="err" data-opt-err="${esc(g.name)}"></span></fieldset>`;
-  }).join("");
+  const q = ui.qty[id] || 1, v = choiceOf(p, ui.sel[id]);
+  // a picked sub-item shows its own photos first; with nothing picked and no item photos, show the first sub-item photo
+  const photos = [...new Set([...(v ? v.photos || [] : []), ...photosOf(p), ...(photosOf(p).length || v ? [] : (p.variants || []).map(x => x.photo).filter(Boolean).slice(0, 1))])];
+  const included = v && v.included && v.included.length ? v.included : p.included;
+  const pi = Math.min(ui.photo[id] || 0, Math.max(0, photos.length - 1)), pr = priceRange(p), showPrices = pr.lo < pr.hi;
+  const label = p.chooseLabel ? esc(p.chooseLabel) : "Choose one";
+  const chooser = hasChoices(p) ? `<fieldset class="choose">
+      <legend class="label">${label}${REQ}${v ? `<span class="opt-chosen">${esc(v.name)}</span>` : ""}</legend>
+      <div class="ch-grid">${p.variants.map(x => `<label class="ch ${x.soldOut ? "out" : ""} ${x.photo ? "has-ph" : ""}">
+        <input type="radio" name="choice" value="${esc(x.id)}" data-choice data-pid="${esc(p.id)}" ${v && v.id === x.id ? "checked" : ""} ${x.soldOut ? "disabled" : ""}>
+        <span class="ch-box">${x.photo ? `<img src="${esc(x.photo)}" alt="" loading="lazy">` : ""}<span class="ch-txt"><b>${esc(x.name)}</b>${x.soldOut ? `<small>Sold out</small>` : showPrices ? `<small>${money(priceOf(p, x))}</small>` : ""}</span></span>
+      </label>`).join("")}</div>
+      <span class="err" id="chErr"></span>
+    </fieldset>` : "";
   return shell(`<div class="wrap">
     <button class="back" data-go="">‹ All items</button>
     <div class="product">
       <div class="gallery">
-        <div class="ph">${photos.length ? `<img id="mainPhoto" src="${esc(photos[pi])}" alt="${esc(p.name)}">` : ""}</div>
+        <div class="ph">${photos.length ? `<img id="mainPhoto" src="${esc(photos[pi])}" alt="${esc(p.name + (v ? ", " + v.name : ""))}">` : ""}</div>
         ${photos.length > 1 ? `<div class="thumbs">${photos.map((u, i) => `<button class="thumb" data-photo="${i}" data-pid="${esc(p.id)}" aria-label="Photo ${i + 1} of ${photos.length}" aria-pressed="${i === pi}"><img src="${esc(u)}" alt="" loading="lazy"></button>`).join("")}</div>` : ""}
       </div>
       <div>
         <h1>${esc(p.name)}</h1>
-        <p class="lede">${esc(p.blurb)}</p>
+        ${p.blurb ? `<p class="lede">${esc(p.blurb)}</p>` : ""}
+        ${v && v.blurb ? `<div class="ch-about"><b>${esc(v.name)}</b><p>${esc(v.blurb)}</p></div>` : ""}
         <div class="big-price" id="bigPrice"></div>
-        ${hasBulk(p) ? `<p class="bulk-line">${priceRange(p).lo < priceRange(p).hi ? `Buy ${p.bulkMin} or more (any mix of options) and save ${p.bulkPct}% on each one.` : `Buy ${p.bulkMin} or more and pay ${money(bulkUnit({ ...p, price: priceRange(p).lo }))} each (${p.bulkPct}% off).`}</p>` : `<div style="height:20px"></div>`}
-        ${p.included.length ? `<span class="label">What’s included</span><ul class="incl">${p.included.map(i => `<li>${esc(i)}</li>`).join("")}</ul>` : ""}
+        ${hasBulk(p) ? `<p class="bulk-line">${showPrices ? `Buy ${p.bulkMin} or more${hasChoices(p) ? " (any mix)" : ""} and save ${p.bulkPct}% on each one.` : `Buy ${p.bulkMin} or more${hasChoices(p) ? " (any mix)" : ""} and pay ${money(r2(pr.lo * (1 - p.bulkPct / 100)))} each (${p.bulkPct}% off).`}</p>` : `<div style="height:20px"></div>`}
+        ${included.length ? `<span class="label">What’s included</span><ul class="incl">${included.map(i => `<li>${esc(i)}</li>`).join("")}</ul>` : ""}
         <div class="buy">
-          ${groups}
+          ${chooser}
           <div class="buy-row">
             <div><span class="label">Quantity</span>${stepper("pq", q, id)}</div>
             <div class="line-total" id="plt"></div>
@@ -308,9 +308,9 @@ function viewProduct(id) {
 function updateProduct(id) {
   const p = findP(id); if (!p) return;
   const q = ui.qty[id] || 1, inCart = cart.filter(l => l.id === id).reduce((s, l) => s + l.qty, 0);
-  const sel = ui.sel[id], ext = extraFor(p, sel), pr = priceRange(p);
-  const r = priceFor(p, q, q + inCart, ext), n = nudgeText(p, q + inCart);
-  document.getElementById("bigPrice").innerHTML = (!fullOpts(p, sel) && pr.lo < pr.hi ? `<small>From</small> ` : "") + `${money(p.price + ext)} <small>each</small>`;
+  const v = choiceOf(p, ui.sel[id]), pr = priceRange(p), each = v ? priceOf(p, v) : pr.lo;
+  const r = priceFor(p, q, q + inCart, each), n = nudgeText(p, q + inCart);
+  document.getElementById("bigPrice").innerHTML = (!v && pr.lo < pr.hi ? `<small>From</small> ` : "") + `${money(each)} <small>each</small>`;
   document.getElementById("plt").innerHTML = (r.bulk ? `<s>${money(r.full)}</s>` : "") + `<b>${money(r.total)}</b>`;
   const el = document.getElementById("pn");
   if (n) { el.hidden = false; el.className = "nudge" + (n.won ? " won" : ""); el.textContent = n.text; } else el.hidden = true;
@@ -330,12 +330,12 @@ function viewCart() {
     </div></div>`);
 }
 function cartItem(l, moreBelow) { // the bulk note shows once, under the last line of that item
-  const r = priceFor(l.p, l.qty, l.bulkQty, extraFor(l.p, l.opts)), n = moreBelow ? null : nudgeText(l.p, l.bulkQty), ph = photosOf(l.p)[0];
+  const r = priceFor(l.p, l.qty, l.bulkQty, l.each), n = moreBelow ? null : nudgeText(l.p, l.bulkQty), ph = photosOf(l.p)[0];
   return `<div class="item">
-    ${ph ? `<img src="${esc(ph)}" alt="">` : `<span></span>`}
+    ${(l.choice && l.choice.photo) || ph ? `<img src="${esc((l.choice && l.choice.photo) || ph)}" alt="">` : `<span></span>`}
     <div>
       <h3><button data-go="item-${esc(l.p.id)}">${esc(l.p.name)}</button></h3>
-      ${l.opts && Object.keys(l.opts).length ? `<div class="opts">${esc(optLine(l.opts))}</div>` : ""}
+      ${l.choice ? `<div class="opts">${esc(choiceText(l.p.chooseLabel, l.choice.name))}</div>` : ""}
       <div class="meta">${money(r.unit)} each${r.bulk ? ` · ${l.p.bulkPct}% bulk discount` : ""}</div>
       <div class="controls">${stepper("cq", l.qty, l.key, true)}<button class="textbtn" data-remove="${esc(l.key)}">Remove</button></div>
       ${n ? `<div class="nudge ${n.won ? "won" : ""}">${esc(n.text)}</div>` : ""}
@@ -363,7 +363,7 @@ function summaryInner(mode) {
     <div class="sum-row total"><span>Total</span><b>${money(t.total + (d && d.ok ? d.fee : 0))}</b></div>
     <p class="fine">No payment today. We’ll contact you to confirm and arrange ${store.delivery.enabled ? "pickup or delivery" : "pickup"}.</p>
     ${mode === "cart" ? `<button class="btn big block" data-go="checkout">Continue to checkout</button>`
-      : `<div style="display:grid;gap:10px;border-top:1px solid var(--line);padding-top:12px">${cartLines().map(l => { const r = priceFor(l.p, l.qty, l.bulkQty, extraFor(l.p, l.opts)), ph = photosOf(l.p)[0]; return `<div class="mini">${ph ? `<img src="${esc(ph)}" alt="">` : ""}<div>${esc(l.p.name)}${l.opts && Object.keys(l.opts).length ? `<br><span>${esc(optLine(l.opts))}</span>` : ""}<br><span>${l.qty} × ${money(r.unit)}</span></div><b>${money(r.total)}</b></div>`; }).join("")}</div>`}`;
+      : `<div style="display:grid;gap:10px;border-top:1px solid var(--line);padding-top:12px">${cartLines().map(l => { const r = priceFor(l.p, l.qty, l.bulkQty, l.each), ph = photosOf(l.p)[0]; return `<div class="mini">${ph ? `<img src="${esc(ph)}" alt="">` : ""}<div>${esc(l.p.name)}${l.choice ? `<br><span>${esc(choiceText(l.p.chooseLabel, l.choice.name))}</span>` : ""}<br><span>${l.qty} × ${money(r.unit)}</span></div><b>${money(r.total)}</b></div>`; }).join("")}</div>`}`;
 }
 function refreshSummary(mode) { const el = document.getElementById("sum"); if (el) el.innerHTML = summaryInner(mode); }
 
@@ -442,7 +442,7 @@ async function placeOrder(form) {
   ui.busy = true; setBusy(btn, true, "Sending…");
   try {
     const res = await api("POST", "/api/orders", {
-      items: cart.map(l => ({ id: l.id, qty: l.qty, opts: l.opts || {} })), method, analytics: analyticsIds(), date: f.date, notes: f.notes, botcheck: f.botcheck ? "on" : "",
+      items: cart.map(l => ({ id: l.id, qty: l.qty, v: l.v || "" })), method, analytics: analyticsIds(), date: f.date, notes: f.notes, botcheck: f.botcheck ? "on" : "",
       customer: { name: f.name, phone: f.phone, email: f.email },
       address: method === "delivery" ? { street: f.street, unit: f.unit, city: f.city, state: f.state, zip: (f.zip || "").trim() } : null
     });
@@ -461,7 +461,7 @@ function viewDone() {
     <div class="check">${CHECK}</div>
     <h1>Thanks, ${esc(o.name.split(" ")[0])}!</h1>
     <p>Your order request ${esc(o.id)} is in. We’ll reach out soon by phone or email to confirm the details.</p>
-    <div class="receipt">${o.items.map(i => `<div class="sum-row"><span>${i.qty} × ${esc(i.name)}${i.opts && i.opts.length ? `<br><small>${esc(i.opts.map(o => `${o.name}: ${o.value}`).join(" · "))}</small>` : ""}</span><span>${money(i.total)}</span></div>`).join("")}
+    <div class="receipt">${o.items.map(i => `<div class="sum-row"><span>${i.qty} × ${esc(i.name)}${i.variant ? `<br><small>${esc(choiceText(i.label, i.variant))}</small>` : ""}</span><span>${money(i.total)}</span></div>`).join("")}
       ${o.method === "delivery" ? `<div class="sum-row"><span>Delivery (estimate)</span><span>${o.delivery ? money(o.delivery) : "Free"}</span></div>` : ""}
       <div class="sum-row total"><span>Total</span><b>${money(o.total)}</b></div></div>
     <button class="btn" data-go="">Back to the shop</button>
@@ -541,7 +541,7 @@ function adminTop() {
 function viewAdmin() {
   if (!admin.authed) return viewLogin();
   if (!admin.data) return adminTop() + `<div class="loading">Loading your shop…</div>`;
-  if (admin.draft) return adminTop() + viewEdit();
+  if (admin.draft) return adminTop() + (admin.sub ? viewSubEdit() : viewEdit());
   const d = admin.data;
   const newOrders = d.orders.filter(o => o.status === "New").length, newMsgs = d.messages.filter(m => m.status === "New").length;
   const tab = (k, label, badge) => `<button role="tab" aria-selected="${admin.tab === k}" data-tab="${k}">${label}${badge ? `<span class="badge">${badge}</span>` : ""}</button>`;
@@ -568,103 +568,147 @@ function adminProducts() {
   return `<div class="rows">
     <button class="btn" data-new style="justify-self:start">+ Add an item</button>
     ${ps.length ? ps.map(p => `<div class="prow">
-      ${p.photo ? `<img src="${esc(p.photo)}" alt="">` : `<div class="noimg"></div>`}
+      ${(p => p ? `<img src="${esc(p)}" alt="">` : `<div class="noimg"></div>`)(photosOf(p)[0] || (p.variants || []).map(v => v.photo).find(Boolean))}
       <div><h3>${esc(p.name)}<span class="status ${p.visible ? "on" : "off"}">${p.visible ? "Showing" : "Hidden"}</span></h3>
-      <div class="meta">${money(p.price)} each${hasBulk(p) ? ` · ${p.bulkPct}% off from ${p.bulkMin}` : " · no bulk discount"}${photosOf(p).length > 1 ? ` · ${photosOf(p).length} photos` : ""}${(p.options || []).length ? ` · options: ${esc(p.options.map(g => g.name).join(", "))}` : ""}</div></div>
+      <div class="meta">${(pr => pr.lo < pr.hi ? `${money(pr.lo)}–${money(pr.hi)}` : `${money(pr.lo)} each`)(priceRange(p))}${hasChoices(p) ? ` · ${plural(p.variants.length, "sub-item")}${p.variants.some(v => v.soldOut) ? ` (${p.variants.filter(v => v.soldOut).length} sold out)` : ""}` : ""}${hasBulk(p) ? ` · ${p.bulkPct}% off ${p.bulkMin}+` : ""}</div></div>
       <button class="btn line sm" data-edit="${esc(p.id)}">Edit</button>
     </div>`).join("") : `<div class="empty-state"><h2>No items yet</h2><p>Tap “Add an item” to list your first one.</p></div>`}
   </div>`;
 }
+/* item editor. Sub-items open in their own screen (admin.sub = { i, d }). */
+const sec = (title, sub, body) => `<section class="ed-sec"><div class="ed-h"><h2>${title}</h2>${sub ? `<p class="fine">${sub}</p>` : ""}</div>${body}</section>`;
+function photoTiles(list, k, fileId) { // k: "ph" for the item, "sph" for a sub-item
+  return `<div class="photo-list">${list.map((u, i) => `<div class="photo-tile">
+      <img src="${esc(u)}" alt="Photo ${i + 1}">${i === 0 ? `<span class="main-tag">Main</span>` : `<button type="button" class="mk-main" data-${k}-main="${i}">Make main</button>`}
+      <button type="button" class="x" data-${k}-del="${i}" aria-label="Remove photo ${i + 1}">×</button></div>`).join("")}
+      ${list.length < 10 ? `<label class="photo-add"><span>+</span>${list.length ? "Add more" : "Add photos"}<input type="file" accept="image/*" id="${fileId}" multiple hidden></label>` : ""}
+    </div>`;
+}
+function actionsBar(main, extra) {
+  return `<div class="actions ed-actions ${admin.dirty ? "dirty" : ""}">${main}${extra}<span class="unsaved">Not saved yet</span></div>`;
+}
 function viewEdit() {
-  const d = admin.draft, isNew = !d.id;
+  const d = admin.draft, isNew = !d.id, many = d.variants.length > 0;
+  const subRow = (v, i) => {
+    const price = v.price > 0 ? money(v.price) : d.price > 0 ? `${money(d.price)} <span>(item price)</span>` : `<em class="need">Needs a price</em>`;
+    return `<div class="sub-row">
+      <button type="button" class="sub-open" data-sub-edit="${i}">
+        ${v.photos[0] ? `<img src="${esc(v.photos[0])}" alt="">` : `<span class="noimg"></span>`}
+        <span class="sub-txt"><b>${esc(v.name)}</b><small>${price}${v.photos.length > 1 ? ` · ${v.photos.length} photos` : ""}${v.soldOut ? ` · <em class="out">Sold out</em>` : ""}</small></span>
+        <span class="chev" aria-hidden="true">›</span>
+      </button>
+      <div class="sub-acts">
+        <button type="button" data-sub-dup="${i}" title="Make a copy">Copy</button>
+        ${i > 0 ? `<button type="button" data-sub-up="${i}" aria-label="Move ${esc(v.name)} up" title="Move up">↑</button>` : ""}
+      </div>
+    </div>`;
+  };
   return `<main class="wrap">
     <button class="back" data-cancel>‹ All items</button>
     <h1 class="page-title" style="margin-top:4px">${isNew ? "Add an item" : "Edit item"}</h1>
     <div class="edit">
-      <form class="form-card" id="edit" novalidate>
-        ${REQ_NOTE}
-        <div class="field"><span class="label" style="margin:0">Photos <span class="opt">Up to 10. The first one is the main photo.</span></span>
-          <div class="photo-list">${d.photos.map((u, i) => `<div class="photo-tile">
-            <img src="${esc(u)}" alt="Photo ${i + 1}">${i === 0 ? `<span class="main-tag">Main</span>` : `<button type="button" class="mk-main" data-ph-main="${i}">Make main</button>`}
-            <button type="button" class="x" data-ph-del="${i}" aria-label="Remove photo ${i + 1}">×</button></div>`).join("")}
-            ${d.photos.length < 10 ? `<label class="photo-add"><span>+</span>${d.photos.length ? "Add photos" : "Choose photos"}<input type="file" accept="image/*" id="e-file" multiple hidden></label>` : ""}
-          </div></div>
-        <div class="field"><label for="e-name">Item name${REQ}</label><input class="input" id="e-name" name="name" value="${esc(d.name)}" placeholder="e.g. Purim Mask Paint Kit"><span class="err" data-err="name"></span></div>
-        <div class="field"><label for="e-blurb">Short description</label><textarea class="input" id="e-blurb" name="blurb" placeholder="What is it, and who is it for?">${esc(d.blurb)}</textarea></div>
-        <div class="field"><label for="e-incl">What’s included <span class="opt">One per line</span></label><textarea class="input" id="e-incl" name="included" rows="3" placeholder="1 plaster donut&#10;3 paint colors">${esc(d.included.join("\n"))}</textarea></div>
-        <div class="field"><label for="e-price">Price for one${REQ}</label><div class="adorn pre"><span>$</span><input class="input" id="e-price" name="price" inputmode="decimal" value="${d.price || ""}" placeholder="7.99"></div><span class="err" data-err="price"></span></div>
-        <div class="two">
-          <div class="field"><label for="e-min">Bulk discount starts at</label><div class="adorn post"><input class="input" id="e-min" name="bulkMin" inputmode="numeric" value="${d.bulkMin || ""}" placeholder="10"><span>items</span></div></div>
-          <div class="field"><label for="e-pct">Bulk discount</label><div class="adorn post"><input class="input" id="e-pct" name="bulkPct" inputmode="decimal" value="${d.bulkPct || ""}" placeholder="16"><span>%</span></div></div>
-        </div>
-        <div class="example" id="example"></div>
-        <div class="field"><span class="label" style="margin:0">Options <span class="opt">Optional</span></span>
-          <p class="fine">For things like color or size. If an option has more than one choice, customers must pick one before they can add the item to their cart.</p>
-          ${d.options.map((g, i) => `<div class="opt-edit">
-            <div class="field"><label for="o-n${i}">Option name</label><input class="input" id="o-n${i}" data-oname="${i}" value="${esc(g.name)}" placeholder="${["Color", "Size", "Style"][i] || "Option"}"></div>
-            <div class="field"><label for="o-v${i}">Choices <span class="opt">Separate with commas</span></label><input class="input" id="o-v${i}" data-ovals="${i}" value="${esc(g.values.join(", "))}" placeholder="${["Red, Blue, Green", "Small, Medium, Large", "Classic, Glitter"][i] || "Choice 1, Choice 2"}"></div>
-            <button type="button" class="x" data-opt-del="${i}" aria-label="Remove this option">×</button>
-            <div class="opr" id="opr-${i}">${oprRows(g, i, d.price)}</div></div>`).join("")}
-          <span class="err" data-err="options"></span>
-          ${d.options.length < 5 ? `<button type="button" class="btn line sm" data-opt-add style="justify-self:start">+ Add an option${d.options.length ? "" : " (like color or size)"}</button>` : ""}
-        </div>
-        <label class="toggle"><input type="checkbox" name="visible" ${d.visible ? "checked" : ""}>Show on the website</label>
-        <div class="actions">
-          <button class="btn" type="submit">${isNew ? "Add item" : "Save changes"}</button>
-          <button class="btn line" type="button" data-cancel>Cancel</button>
-          ${isNew ? "" : `<button class="btn danger ${admin.deleteArmed ? "armed" : ""}" type="button" data-delete>${admin.deleteArmed ? "Tap again to delete" : "Delete"}</button>`}
-        </div>
+      <form class="form-card ed" id="edit" novalidate>
+        ${sec("Photos", "The first photo is the one customers see first.", photoTiles(d.photos, "ph", "e-file"))}
+        ${sec("About it", "", `
+          <div class="field"><label for="e-name">Name${REQ}</label><input class="input" id="e-name" name="name" value="${esc(d.name)}" placeholder="e.g. Purim Mask Paint Kit"><span class="err" data-err="name"></span></div>
+          <div class="field"><label for="e-blurb">Description <span class="opt">Optional</span></label><textarea class="input" id="e-blurb" name="blurb" rows="3" placeholder="What is it, and who is it for?">${esc(d.blurb)}</textarea></div>
+          <div class="field"><label for="e-incl">What’s included <span class="opt">Optional, one per line</span></label><textarea class="input" id="e-incl" name="included" rows="3" placeholder="1 plaster donut&#10;3 paint colors">${esc(d.included.join("\n"))}</textarea></div>`)}
+        ${sec("Sub-items", "Sell this item in different versions: sizes, colors, or both (like “Large – Gold”). Each sub-item is a full listing with its own name, photos, description and price. Customers pick one.", `
+          ${many ? `<div class="field"><label for="e-label">What are customers choosing? <span class="opt">Shows as “Choose a …”</span></label><input class="input" id="e-label" name="chooseLabel" value="${esc(d.chooseLabel || "")}" placeholder="Size, Color, Style, Option…" list="labels" style="max-width:320px"><datalist id="labels"><option>Size</option><option>Color</option><option>Style</option><option>Design</option><option>Option</option></datalist></div>` : ""}
+          ${many ? `<div class="sub-list">${d.variants.map(subRow).join("")}</div>` : ""}
+          <span class="err" data-err="variants"></span>
+          <button type="button" class="ch-add" data-sub-add><span>+</span> Add a sub-item</button>`)}
+        ${sec("Price", "", `
+          <div class="field"><label for="e-price">${many ? "Price" : `Price${REQ}`} ${many ? `<span class="opt">Optional: used by any sub-item without its own price</span>` : ""}</label>
+            <div class="adorn pre" style="max-width:220px"><span>$</span><input class="input" id="e-price" name="price" inputmode="decimal" value="${d.price || ""}" placeholder="${many ? "—" : "7.99"}"></div><span class="err" data-err="price"></span></div>
+          <details class="ed-more" ${hasBulk(d) ? "open" : ""}><summary>Bulk discount <span class="opt">${hasBulk(d) ? `${d.bulkPct}% off ${d.bulkMin}+` : "Optional"}</span></summary>
+            <div class="two">
+              <div class="field"><label for="e-min">Starts at</label><div class="adorn post"><input class="input" id="e-min" name="bulkMin" inputmode="numeric" value="${d.bulkMin || ""}" placeholder="10"><span>items</span></div></div>
+              <div class="field"><label for="e-pct">Discount</label><div class="adorn post"><input class="input" id="e-pct" name="bulkPct" inputmode="decimal" value="${d.bulkPct || ""}" placeholder="10"><span>%</span></div></div>
+            </div>
+            <div class="example" id="example"></div>
+          </details>`)}
+        <section class="ed-sec"><label class="toggle"><input type="checkbox" name="visible" ${d.visible ? "checked" : ""}>Show on the website</label></section>
+        ${actionsBar(`<button class="btn" type="submit">${isNew ? "Add item" : "Save changes"}</button>
+          <button class="btn line" type="button" data-cancel>${admin.cancelArmed ? "Tap again to discard" : "Cancel"}</button>`,
+          isNew ? "" : `<button class="btn danger ${admin.deleteArmed ? "armed" : ""}" type="button" data-delete>${admin.deleteArmed ? "Tap again to delete" : "Delete"}</button>`)}
       </form>
       <div class="side"><span class="label">How customers will see it</span><div id="preview" style="max-width:300px"></div></div>
     </div></main>`;
 }
-function oprRows(g, i, base) {
-  if (!g.values.length) return "";
-  return `<div class="opr-head"><b>Price for each choice</b> <span class="opt">Leave empty to use the item’s price. Type an amount to add, or a minus to take off (like -1).</span></div>
-    ${g.values.map((v, j) => { const ex = (g.extras && g.extras[j]) || 0; return `<div class="opr-row"><span class="opr-name">${esc(v)}</span>
-      <div class="adorn pre"><span>$</span><input class="input" data-oex="${i}" data-val="${esc(v)}" value="${ex ? ex : ""}" placeholder="0" autocomplete="off" aria-label="Price change for ${esc(v)}"></div>
-      <span class="opr-eq" data-eq="${i}:${j}">${money(base + ex)}</span></div>`; }).join("")}`;
+function viewSubEdit() {
+  const d = admin.draft, s = admin.sub.d, isNew = admin.sub.i < 0;
+  return `<main class="wrap">
+    <button class="back" data-sub-cancel>‹ Back to ${esc(d.name || "the item")}</button>
+    <h1 class="page-title" style="margin-top:4px">${isNew ? "New sub-item" : esc(s.name || "Sub-item")}</h1>
+    <p class="fine" style="margin:-6px 0 16px">Part of <b>${esc(d.name || "this item")}</b>. Customers see these details when they pick this one.</p>
+    <div class="edit">
+      <form class="form-card ed" id="subedit" novalidate>
+        ${sec("Photos", "Shown first when a customer picks this sub-item. Leave empty to show the item’s photos.", photoTiles(s.photos, "sph", "sub-file"))}
+        ${sec("About it", "", `
+          <div class="field"><label for="s-name">Name${REQ}</label><input class="input" id="s-name" name="name" value="${esc(s.name)}" placeholder="e.g. Large, Gold, or Large – Gold"><span class="err" data-err="name"></span></div>
+          <div class="field"><label for="s-blurb">Description <span class="opt">Optional</span></label><textarea class="input" id="s-blurb" name="blurb" rows="3" placeholder="Anything special about this one">${esc(s.blurb)}</textarea></div>
+          <div class="field"><label for="s-incl">What’s included <span class="opt">Optional. Leave empty to use the item’s list</span></label><textarea class="input" id="s-incl" name="included" rows="3" placeholder="${esc(d.included.join("\n"))}">${esc(s.included.join("\n"))}</textarea></div>`)}
+        ${sec("Price", "", `
+          <div class="field"><label for="s-price">Price ${d.price > 0 ? `<span class="opt">Leave empty to use the item price (${money(d.price)})</span>` : REQ}</label>
+            <div class="adorn pre" style="max-width:220px"><span>$</span><input class="input" id="s-price" name="price" inputmode="decimal" value="${s.price > 0 ? s.price : ""}" placeholder="${d.price > 0 ? d.price.toFixed(2) : "9.99"}"></div><span class="err" data-err="price"></span></div>
+          <label class="toggle"><input type="checkbox" name="soldOut" ${s.soldOut ? "checked" : ""}><span>Sold out<small class="toggle-hint">Customers still see it, but can’t pick it</small></span></label>`)}
+        ${actionsBar(`<button class="btn" type="submit">Done</button><button class="btn line" type="button" data-sub-cancel>Cancel</button>`,
+          isNew ? "" : `<button class="btn danger ${admin.subDelArmed ? "armed" : ""}" type="button" data-sub-delete>${admin.subDelArmed ? "Tap again to remove" : "Remove"}</button>`)}
+      </form>
+    </div></main>`;
 }
+const numIn = s => parseFloat(String(s).replace(/[^\d.]/g, ""));
+const lines = t => t.split("\n").map(s => s.trim()).filter(Boolean);
 function readDraft() {
   const f = document.getElementById("edit"); if (!f) return;
-  const d = admin.draft, v = n => f.elements[n].value;
-  d.name = v("name"); d.blurb = v("blurb");
-  d.included = v("included").split("\n").map(s => s.trim()).filter(Boolean);
-  d.price = parseFloat(v("price").replace(/[^\d.]/g, "")) || 0;
+  const d = admin.draft, v = n => f.elements[n] ? f.elements[n].value : "";
+  d.name = v("name"); d.blurb = v("blurb"); d.included = lines(v("included"));
+  d.price = r2(numIn(v("price")) || 0);
   d.bulkMin = parseInt(v("bulkMin")) || 0;
   d.bulkPct = Math.min(90, Math.max(0, parseFloat(v("bulkPct")) || 0));
   d.visible = f.elements.visible.checked;
-  d.options = d.options.map((g, i) => {
-    const n = f.querySelector(`[data-oname="${i}"]`), v = f.querySelector(`[data-ovals="${i}"]`);
-    if (!n || !v) return g;
-    const values = [...new Set(v.value.split(",").map(x => x.trim()).filter(Boolean))];
-    const ex = Object.fromEntries(g.values.map((x, j) => [x, (g.extras && g.extras[j]) || 0]));
-    f.querySelectorAll(`[data-oex="${i}"]`).forEach(inp => { const x = parseFloat(inp.value.replace(/[−–]/g, "-").replace(/[^\d.-]/g, "")); ex[inp.dataset.val] = Number.isFinite(x) ? r2(x) : 0; });
-    return { name: n.value.trim(), values, extras: values.map(x => ex[x] || 0) };
-  });
+  if (f.elements.chooseLabel) d.chooseLabel = v("chooseLabel").trim();
   d.photo = d.photos[0] || "";
 }
+function readSub() {
+  const f = document.getElementById("subedit"); if (!f || !admin.sub) return;
+  const s = admin.sub.d;
+  s.name = f.elements.name.value.trim(); s.blurb = f.elements.blurb.value.trim(); s.included = lines(f.elements.included.value);
+  s.price = r2(numIn(f.elements.price.value)) || null; s.soldOut = f.elements.soldOut.checked; s.photo = s.photos[0] || "";
+}
 function updatePreview() {
+  if (!document.getElementById("edit")) return;
   readDraft(); const d = admin.draft;
-  document.querySelectorAll("[data-eq]").forEach(el => { const [i, j] = el.dataset.eq.split(":").map(Number), g = d.options[i]; if (g) el.textContent = money(d.price + ((g.extras && g.extras[j]) || 0)); });
-  document.getElementById("preview").innerHTML = card({ ...d, name: d.name || "Product name" }, true);
-  const ex = document.getElementById("example");
-  if (d.price > 0 && hasBulk(d)) ex.textContent = `Customers pay ${money(d.price)} each, or ${money(bulkUnit(d))} each when they order ${d.bulkMin} or more${needsChoice(d) ? " (any mix of options counts)" : ""}. ${d.bulkMin} would cost ${money(bulkUnit(d) * d.bulkMin)}.`;
-  else if (d.price > 0) ex.textContent = `Customers pay ${money(d.price)} each. Fill in both bulk boxes to offer a discount.`;
-  else ex.textContent = "Enter a price to see what customers will pay.";
+  document.getElementById("preview").innerHTML = card({ ...d, name: d.name || "Item name" }, true);
+  const ex = document.getElementById("example"), pr = priceRange(d);
+  if (!(pr.lo > 0)) ex.textContent = "Set a price to see what customers will pay.";
+  else if (hasBulk(d)) ex.textContent = `Order ${d.bulkMin} or more${hasChoices(d) ? " (any mix of sub-items)" : ""} and each one is ${d.bulkPct}% off${pr.lo < pr.hi ? "" : `: ${money(r2(pr.lo * (1 - d.bulkPct / 100)))} instead of ${money(pr.lo)}`}.`;
+  else ex.textContent = "Fill in both boxes to give a discount on bigger orders.";
+}
+function markDirty() { admin.dirty = true; admin.cancelArmed = false; document.querySelector(".ed-actions")?.classList.add("dirty"); }
+function openSub(i, d) { readDraft(); admin.sub = { i, d }; admin.subDelArmed = false; render(); }
+function saveSub(form) {
+  readSub(); const s = admin.sub.d, d = admin.draft, errs = {};
+  if (!s.name) errs.name = "Give it a name, like Large or Gold.";
+  else if (d.variants.some((v, j) => j !== admin.sub.i && v.name.toLowerCase() === s.name.toLowerCase())) errs.name = "Another sub-item already has this name.";
+  if (!(s.price > 0) && !(d.price > 0)) errs.price = "Enter a price. (The item has no price of its own.)";
+  if (showErrs(form, errs)) return;
+  if (admin.sub.i < 0) d.variants.push(s); else d.variants[admin.sub.i] = s;
+  const isNewItem = !d.id; admin.sub = null; admin.dirty = true; render();
+  toast(`${s.name} is ready. Tap “${isNewItem ? "Add item" : "Save changes"}” to publish.`);
 }
 async function saveProduct(form) {
   readDraft(); const d = admin.draft, errs = {};
   if (!d.name.trim()) errs.name = "Give the item a name.";
-  if (d.options.some(g => g.values.length && !g.name)) errs.options = "Give each option a name, like Color or Size.";
-  else if (d.options.some(g => g.name && !g.values.length)) errs.options = "Add at least one choice to each option, or remove it.";
-  else if (d.price > 0 && !(priceRange(d).lo > 0)) errs.options = "A price change makes some choices cost $0 or less. Lower the minus amount.";
-  if (!(d.price > 0)) errs.price = "Enter a price, like 7.99.";
-  if (showErrs(form, errs) || admin.busy) return;
+  if (!d.variants.length && !(d.price > 0)) errs.price = "Enter a price, like 7.99.";
+  else if (d.variants.some(c => !(priceOf(d, c) > 0))) errs.variants = `${d.variants.find(c => !(priceOf(d, c) > 0)).name} needs a price. Open it and add one, or set a price for the whole item.`;
+  if (showErrs(form, errs)) { form.querySelector(".err:not(:empty)")?.scrollIntoView({ behavior: "smooth", block: "center" }); return; }
+  if (admin.busy) return;
   const btn = form.querySelector('button[type="submit"]'); admin.busy = true; setBusy(btn, true, "Saving…");
   try {
     await api("POST", "/api/admin/products", d);
-    const wasNew = !d.id; admin.draft = null; await loadAdmin(); window.scrollTo(0, 0);
+    const wasNew = !d.id; admin.draft = null; admin.dirty = false; await loadAdmin(); window.scrollTo(0, 0);
     toast(wasNew ? "Item added" : "Changes saved");
   } catch (e) { if (e.errors) showErrs(form, e.errors); adminFail(e); }
   finally { admin.busy = false; setBusy(btn, false); }
@@ -763,7 +807,7 @@ function adminOrders() {
       <div class="meta">${esc(o.id)} · ${new Date(o.created_at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}</div></div>
       <select data-status="${esc(o.id)}" data-kind="orders" aria-label="Order status">${["New", "Confirmed", "Done"].map(s => `<option ${o.status === s ? "selected" : ""}>${s}</option>`).join("")}</select>
     </div>
-    <ul>${o.items.map(i => `<li><span>${i.qty} × ${esc(i.name)}${i.opts && i.opts.length ? ` <b class="opt-tag">${esc(i.opts.map(o => `${o.name}: ${o.value}`).join(" · "))}</b>` : ""}${i.bulk ? ` <span class="meta">(${i.pct}% bulk)</span>` : ""}</span><span>${money(i.total)}</span></li>`).join("")}
+    <ul>${o.items.map(i => `<li><span>${i.qty} × ${esc(i.name)}${i.variant ? ` <b class="opt-tag">${esc(choiceText(i.label, i.variant))}</b>` : ""}${i.bulk ? ` <span class="meta">(${i.pct}% bulk)</span>` : ""}</span><span>${money(i.total)}</span></li>`).join("")}
       ${o.method === "delivery" ? `<li><span>Delivery (estimate)</span><span>${o.delivery ? money(o.delivery) : "Free"}</span></li>` : ""}
       <li style="font-weight:700;border-top:1px solid var(--line);padding-top:6px"><span>Total</span><span>${money(o.total)}</span></li></ul>
     <div class="meta">${o.method === "delivery" ? "Local delivery: " + esc(addrText(o.address)) : "Pickup"}${o.date ? " · needed by " + esc(o.date) : ""}</div>
@@ -919,18 +963,14 @@ document.addEventListener("click", async e => {
   if (ds.scroll) { document.getElementById(ds.scroll)?.scrollIntoView({ behavior: "smooth" }); return; }
   if (ds.add) {
     const p = findP(ds.add); if (!p) return;
-    const fromPage = "fromPage" in ds, opts = fullOpts(p, fromPage ? ui.sel[p.id] : null);
-    if (!opts) {
+    const fromPage = "fromPage" in ds, v = choiceOf(p, ui.sel[p.id]);
+    if (hasChoices(p) && !v) {
       if (!fromPage) { go("item-" + p.id); return; }
-      let first = null;
-      for (const g of p.options) if (!fullOpts({ options: [g] }, ui.sel[p.id])) {
-        const el = document.querySelector(`[data-opt-err="${CSS.escape(g.name)}"]`);
-        if (el) { el.textContent = `Choose a ${g.name.toLowerCase()}.`; first = first || el.closest(".opt-group"); }
-      }
-      if (first) { first.scrollIntoView({ behavior: "smooth", block: "center" }); first.querySelector("input")?.focus({ preventScroll: true }); }
-      return;
+      const err = document.getElementById("chErr"); err.textContent = `Choose a ${chooseWord(p)} first.`;
+      const fs = err.closest(".choose"); fs.classList.remove("shake"); void fs.offsetWidth; fs.classList.add("shake");
+      fs.scrollIntoView({ behavior: "smooth", block: "center" }); return;
     }
-    addToCart(p.id, fromPage ? (ui.qty[p.id] || 1) : 1, opts);
+    addToCart(p.id, fromPage ? (ui.qty[p.id] || 1) : 1, v ? v.id : undefined);
     if (fromPage) updateProduct(p.id);
     return;
   }
@@ -954,13 +994,26 @@ document.addEventListener("click", async e => {
   if (ds.tab) { admin.tab = ds.tab; admin.sdraft = null; admin.ddraft = null; render(true); if (ds.tab === "analytics") loadAnalytics(); return; }
   if (ds.range) { admin.anRange = ds.range; loadAnalytics(); return; }
   if ("anRefresh" in ds) { loadAnalytics(); return; }
-  if ("new" in ds) { admin.draft = { id: null, name: "", blurb: "", included: [], price: 0, bulkMin: 10, bulkPct: 10, visible: true, photo: "", photos: [], options: [] }; admin.deleteArmed = false; render(); return; }
-  if ("optAdd" in ds) { readDraft(); admin.draft.options.push({ name: "", values: [] }); render(true); document.getElementById(`o-n${admin.draft.options.length - 1}`)?.focus(); return; }
-  if (ds.optDel !== undefined) { readDraft(); admin.draft.options.splice(Number(ds.optDel), 1); render(true); return; }
-  if (ds.phDel !== undefined) { readDraft(); admin.draft.photos.splice(Number(ds.phDel), 1); render(true); return; }
-  if (ds.phMain !== undefined) { readDraft(); const ph = admin.draft.photos; ph.unshift(...ph.splice(Number(ds.phMain), 1)); render(true); return; }
-  if (ds.edit) { const src = admin.data.products.find(p => p.id === ds.edit); admin.draft = { photos: photosOf(src), options: [], ...structuredClone(src) }; admin.deleteArmed = false; render(); return; }
-  if ("cancel" in ds) { admin.draft = null; render(); return; }
+  if ("new" in ds) { admin.draft = { id: null, name: "", blurb: "", included: [], price: 0, bulkMin: 0, bulkPct: 0, visible: true, photo: "", photos: [], variants: [], chooseLabel: "" }; admin.sub = null; admin.dirty = false; admin.cancelArmed = false; admin.deleteArmed = false; render(); return; }
+  if (ds.phDel !== undefined) { readDraft(); admin.draft.photos.splice(Number(ds.phDel), 1); admin.dirty = true; render(true); return; }
+  if (ds.phMain !== undefined) { readDraft(); const ph = admin.draft.photos; ph.unshift(...ph.splice(Number(ds.phMain), 1)); admin.dirty = true; render(true); return; }
+  if (ds.sphDel !== undefined) { readSub(); admin.sub.d.photos.splice(Number(ds.sphDel), 1); render(true); return; }
+  if (ds.sphMain !== undefined) { readSub(); const ph = admin.sub.d.photos; ph.unshift(...ph.splice(Number(ds.sphMain), 1)); render(true); return; }
+  if ("subAdd" in ds) { openSub(-1, { id: "", name: "", price: null, photos: [], photo: "", blurb: "", included: [], soldOut: false }); return; }
+  if (ds.subEdit !== undefined) { const i = Number(ds.subEdit); openSub(i, structuredClone(admin.draft.variants[i])); return; }
+  if (ds.subDup !== undefined) { const v = structuredClone(admin.draft.variants[Number(ds.subDup)]); openSub(-1, { ...v, id: "", name: v.name + " (copy)" }); setTimeout(() => document.getElementById("s-name")?.select(), 0); return; }
+  if (ds.subUp !== undefined) { readDraft(); const vs = admin.draft.variants, i = Number(ds.subUp); [vs[i - 1], vs[i]] = [vs[i], vs[i - 1]]; admin.dirty = true; render(true); return; }
+  if ("subCancel" in ds) { admin.sub = null; render(); return; }
+  if ("subDelete" in ds) {
+    if (!admin.subDelArmed) { readSub(); admin.subDelArmed = true; render(true); return; }
+    const name = admin.draft.variants[admin.sub.i].name; admin.draft.variants.splice(admin.sub.i, 1); admin.sub = null; admin.dirty = true; render();
+    toast(`${name} removed. Tap “Save changes” to publish.`); return;
+  }
+  if (ds.edit) { const src = admin.data.products.find(p => p.id === ds.edit); admin.draft = { variants: [], chooseLabel: "", ...structuredClone(src), photos: photosOf(src) }; admin.sub = null; admin.dirty = false; admin.cancelArmed = false; admin.deleteArmed = false; render(); return; }
+  if ("cancel" in ds) {
+    if (admin.dirty && !admin.cancelArmed) { readDraft(); admin.cancelArmed = true; render(true); return; }
+    admin.draft = null; admin.dirty = false; admin.cancelArmed = false; render(); return;
+  }
   if ("delete" in ds) {
     if (!admin.deleteArmed) { readDraft(); admin.deleteArmed = true; render(true); return; }
     try { await api("DELETE", `/api/admin/products/${encodeURIComponent(admin.draft.id)}`); admin.draft = null; admin.deleteArmed = false; await loadAdmin(); toast("Product deleted"); }
@@ -1004,8 +1057,7 @@ document.addEventListener("input", e => {
   }
   if ("qty" in t.dataset && t.dataset.ctx === "pq") { const n = parseInt(t.value); if (n >= 1) setQty("pq", t.dataset.id, n); }
   if (t.id === "c-zip") checkZip(t.value.trim());
-  if (t.closest("#edit") && t.type !== "file") updatePreview();
-  if (t.dataset.ovals !== undefined) { const i = Number(t.dataset.ovals), el = document.getElementById(`opr-${i}`); if (el) el.innerHTML = oprRows(admin.draft.options[i], i, admin.draft.price); }
+  if (t.closest("#edit") && t.type !== "file") { updatePreview(); markDirty(); }
   if (t.closest("#season") && t.type !== "file") updateSeasonPreview();
   if (t.dataset.ring !== undefined) { const v = parseFloat(t.value); admin.ddraft.rings[Number(t.dataset.ring)][t.dataset.k] = Number.isFinite(v) ? v : 0; }
   if (t.dataset.zone) { const z = admin.ddraft.zones[t.dataset.zone]; const v = parseFloat(t.value); if (z && v >= 0) { z.fee = r2(v); z.manual = true; } }
@@ -1013,11 +1065,8 @@ document.addEventListener("input", e => {
 document.addEventListener("change", async e => {
   const t = e.target;
   if ("qty" in t.dataset) { const n = parseInt(t.value); t.value = setQty(t.dataset.ctx, t.dataset.id, n >= 1 ? n : 1); }
-  if (t.dataset.optGroup && t.dataset.pid) {
-    const sel = ui.sel[t.dataset.pid] ||= {}; sel[t.dataset.optGroup] = t.value;
-    const fs = t.closest(".opt-group"); fs.querySelector(".opt-chosen").textContent = t.value; fs.querySelector(".err").textContent = "";
-    updateProduct(t.dataset.pid);
-  }
+  if ("choice" in t.dataset && t.dataset.pid) { ui.sel[t.dataset.pid] = t.value; ui.photo[t.dataset.pid] = 0; render(true); document.querySelector(`[data-choice][value="${CSS.escape(t.value)}"]`)?.focus({ preventScroll: true }); }
+
   if (t.name === "method") {
     ui.method = t.value; document.getElementById("addr").hidden = t.value !== "delivery";
     refreshSummary("checkout");
@@ -1029,19 +1078,20 @@ document.addEventListener("change", async e => {
     try { await api("PATCH", `/api/admin/${kind}/${encodeURIComponent(item.id)}`, { status: t.value }); render(true); toast(`Marked ${t.value.toLowerCase()}`); }
     catch (err) { item.status = prev; render(true); adminFail(err); }
   }
-  if (t.closest("#edit") && t.type === "checkbox") updatePreview();
+  if (t.closest("#edit") && t.type === "checkbox") { updatePreview(); markDirty(); }
   if (t.closest("#season") && (t.type === "checkbox" || t.type === "radio" || t.tagName === "SELECT")) updateSeasonPreview();
-  if (t.id === "e-file" && t.files.length) {
-    readDraft();
-    const d = admin.draft, files = [...t.files].slice(0, 10 - d.photos.length);
+  if ((t.id === "e-file" || t.id === "sub-file") && t.files.length) {
+    const isSub = t.id === "sub-file"; if (isSub) readSub(); else readDraft();
+    const d = isSub ? admin.sub.d : admin.draft, files = [...t.files].slice(0, 10 - d.photos.length);
     toast(files.length > 1 ? `Uploading ${files.length} photos…` : "Uploading photo…");
     let added = 0;
     for (const file of files) {
       try { d.photos.push(await uploadPhoto(file, 1400)); added++; }
       catch (err) { if (err.status) adminFail(err); else toast("A photo couldn’t be opened. Try a JPG or PNG."); break; }
     }
-    if (admin.draft === d) { d.photo = d.photos[0] || ""; render(true); }
-    if (added) toast(`${added > 1 ? added + " photos" : "Photo"} uploaded. Remember to save.`);
+    d.photo = d.photos[0] || ""; if (!isSub) admin.dirty = true;
+    if (isSub ? admin.sub && admin.sub.d === d : admin.draft === d) render(true);
+    if (added) toast(`${added > 1 ? added + " photos" : "Photo"} uploaded. ${isSub ? "Tap Done when you’re finished." : "Remember to save."}`);
     if (t.files.length > files.length) toast("You can add up to 10 photos per item.");
   }
   if (t.id === "s-file" && t.files[0]) {
@@ -1071,6 +1121,7 @@ document.addEventListener("submit", async e => {
     return;
   }
   if (f.id === "edit") return saveProduct(f);
+  if (f.id === "subedit") return saveSub(f);
   if (f.id === "season") {
     readSeason();
     try { const res = await api("PUT", "/api/admin/season", admin.sdraft); admin.data.season = res.season; admin.sdraft = null; render(true); toast("Seasonal look saved"); }
@@ -1096,7 +1147,8 @@ document.addEventListener("submit", async e => {
   try {
     store = await api("GET", "/api/store");
     // drop anything no longer sold, and lines whose color/size choice no longer exists
-    cart = cart.filter(l => findP(l.id) && Number.isInteger(l.qty) && l.qty >= 1 && (l.opts = fullOpts(findP(l.id), l.opts)));
+    cart = cart.filter(l => { const p = findP(l.id); if (!p || !Number.isInteger(l.qty) || l.qty < 1) return false;
+      delete l.opts; if (!hasChoices(p)) { delete l.v; return true; } const v = choiceOf(p, l.v); return !!(v && !v.soldOut); });
     const merged = []; for (const l of cart) { const m = merged.find(x => lineKey(x) === lineKey(l)); if (m) m.qty = Math.min(999, m.qty + l.qty); else merged.push(l); }
     cart = merged; saveCart();
     render();
