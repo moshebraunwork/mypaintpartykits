@@ -78,25 +78,31 @@ function rowToProduct(r) {
   if (!photos.length && r.photo) photos = [r.photo];
   return { id: r.id, name: r.name, blurb: r.blurb, included: JSON.parse(r.included), price: r.price,
     bulkMin: r.bulk_min, bulkPct: r.bulk_pct, visible: !!r.visible, photo: photos[0] || "", photos,
-    chooseLabel: r.choose_label || "", variants: JSON.parse(r.variants || "[]") };
+    chooseLabel: r.choose_label || "", variants: JSON.parse(r.variants || "[]").map(v => {
+      const ph = Array.isArray(v.photos) ? v.photos : v.photo ? [v.photo] : [];
+      return { id: v.id, name: v.name, price: v.price, photos: ph, photo: ph[0] || "", blurb: v.blurb || v.note || "", included: v.included || [], soldOut: !!v.soldOut };
+    }) };
 }
-/* Choices are small listings inside an item: [{ id, name, price, photo, note, soldOut }].
-   price null = use the item's price. If an item has choices, customers must pick one. */
+/* Sub-items: complete listings inside an item (a size, a color, or both, e.g. "Large – Gold").
+   [{ id, name, price, photos, blurb, included, soldOut }]. price null = use the item's price.
+   If an item has sub-items, customers must pick one. */
 function cleanVariants(list) {
   const out = [], ids = new Set();
-  for (const v of Array.isArray(list) ? list.slice(0, 40) : []) {
+  for (const v of Array.isArray(list) ? list.slice(0, 60) : []) {
     if (!v || typeof v !== "object") continue;
-    const name = str(v.name, 60), price = r2(num(v.price)), photo = safeUrl(v.photo), note = str(v.note, 300);
-    if (!name && !(price > 0) && !photo && !note) continue; // an untouched empty row
+    const name = str(v.name, 80), price = r2(num(v.price));
+    const photos = [...new Set((Array.isArray(v.photos) ? v.photos : [v.photo]).map(safeUrl).filter(Boolean))].slice(0, 10);
+    const included = (Array.isArray(v.included) ? v.included : []).map(x => str(x, 120)).filter(Boolean).slice(0, 30);
     let id = typeof v.id === "string" && /^[a-z0-9]{4,16}$/.test(v.id) && !ids.has(v.id) ? v.id : "";
     while (!id || ids.has(id)) id = crypto.randomBytes(4).toString("hex");
     ids.add(id);
-    out.push({ id, name, price: price > 0 && price < 100000 ? price : null, photo, note, soldOut: !!v.soldOut });
+    out.push({ id, name, price: price > 0 && price < 100000 ? price : null, photos, photo: photos[0] || "",
+      blurb: str(v.blurb, 1500), included, soldOut: !!v.soldOut });
   }
   return out;
 }
 const priceOf = (p, v) => (v && v.price > 0 ? v.price : p.price);
-const variantPhotos = p => p.variants.map(v => v.photo).filter(Boolean);
+const variantPhotos = p => p.variants.flatMap(v => v.photos);
 const allProducts = () => db.prepare("SELECT * FROM products ORDER BY created_at").all().map(rowToProduct);
 const findProduct = id => rowToProduct(db.prepare("SELECT * FROM products WHERE id=?").get(id));
 const hasBulk = p => p.bulkMin > 1 && p.bulkPct > 0;
@@ -400,10 +406,10 @@ app.post("/api/admin/products", requireAdmin, (req, res) => {
   const errors = {};
   if (!p.name) errors.name = "Give the item a name.";
   const names = p.variants.map(v => v.name.toLowerCase());
-  if (p.variants.some(v => !v.name)) errors.variants = "Give every choice a name, or remove the empty one.";
-  else if (new Set(names).size < names.length) errors.variants = "Two choices have the same name.";
+  if (p.variants.some(v => !v.name)) errors.variants = "Every sub-item needs a name.";
+  else if (new Set(names).size < names.length) errors.variants = "Two sub-items have the same name.";
   else if (!p.variants.length && !(p.price > 0)) errors.price = "Enter a price, like 7.99.";
-  else if (p.variants.some(v => !(priceOf(p, v) > 0))) errors.variants = "Give each choice a price, or set one price for the whole item.";
+  else if (p.variants.some(v => !(priceOf(p, v) > 0))) errors.variants = "Give each sub-item a price, or set one price for the whole item.";
   if (Object.keys(errors).length) return res.status(400).json({ error: "Please fix the highlighted fields.", errors });
   let id = typeof b.id === "string" && findProduct(b.id) ? b.id : null;
   if (id) {

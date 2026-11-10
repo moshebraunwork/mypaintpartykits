@@ -266,7 +266,9 @@ function viewProduct(id) {
   const p = findP(id);
   if (!p) return shell(`<div class="wrap"><div class="empty-state" style="margin-top:30px"><h2>This item isn’t available</h2><p>It may have sold out or been removed.</p><button class="btn" data-go="">See all items</button></div></div>`);
   const q = ui.qty[id] || 1, v = choiceOf(p, ui.sel[id]);
-  const photos = [...new Set([...(v && v.photo ? [v.photo] : []), ...photosOf(p), ...(photosOf(p).length ? [] : (p.variants || []).map(x => x.photo).filter(Boolean))])];
+  // a picked sub-item shows its own photos first; with nothing picked and no item photos, show the first sub-item photo
+  const photos = [...new Set([...(v ? v.photos || [] : []), ...photosOf(p), ...(photosOf(p).length || v ? [] : (p.variants || []).map(x => x.photo).filter(Boolean).slice(0, 1))])];
+  const included = v && v.included && v.included.length ? v.included : p.included;
   const pi = Math.min(ui.photo[id] || 0, Math.max(0, photos.length - 1)), pr = priceRange(p), showPrices = pr.lo < pr.hi;
   const label = p.chooseLabel ? esc(p.chooseLabel) : "Choose one";
   const chooser = hasChoices(p) ? `<fieldset class="choose">
@@ -276,7 +278,6 @@ function viewProduct(id) {
         <span class="ch-box">${x.photo ? `<img src="${esc(x.photo)}" alt="" loading="lazy">` : ""}<span class="ch-txt"><b>${esc(x.name)}</b>${x.soldOut ? `<small>Sold out</small>` : showPrices ? `<small>${money(priceOf(p, x))}</small>` : ""}</span></span>
       </label>`).join("")}</div>
       <span class="err" id="chErr"></span>
-      ${v && v.note ? `<p class="ch-note">${esc(v.note)}</p>` : ""}
     </fieldset>` : "";
   return shell(`<div class="wrap">
     <button class="back" data-go="">‹ All items</button>
@@ -287,10 +288,11 @@ function viewProduct(id) {
       </div>
       <div>
         <h1>${esc(p.name)}</h1>
-        <p class="lede">${esc(p.blurb)}</p>
+        ${p.blurb ? `<p class="lede">${esc(p.blurb)}</p>` : ""}
+        ${v && v.blurb ? `<div class="ch-about"><b>${esc(v.name)}</b><p>${esc(v.blurb)}</p></div>` : ""}
         <div class="big-price" id="bigPrice"></div>
         ${hasBulk(p) ? `<p class="bulk-line">${showPrices ? `Buy ${p.bulkMin} or more${hasChoices(p) ? " (any mix)" : ""} and save ${p.bulkPct}% on each one.` : `Buy ${p.bulkMin} or more${hasChoices(p) ? " (any mix)" : ""} and pay ${money(r2(pr.lo * (1 - p.bulkPct / 100)))} each (${p.bulkPct}% off).`}</p>` : `<div style="height:20px"></div>`}
-        ${p.included.length ? `<span class="label">What’s included</span><ul class="incl">${p.included.map(i => `<li>${esc(i)}</li>`).join("")}</ul>` : ""}
+        ${included.length ? `<span class="label">What’s included</span><ul class="incl">${included.map(i => `<li>${esc(i)}</li>`).join("")}</ul>` : ""}
         <div class="buy">
           ${chooser}
           <div class="buy-row">
@@ -539,7 +541,7 @@ function adminTop() {
 function viewAdmin() {
   if (!admin.authed) return viewLogin();
   if (!admin.data) return adminTop() + `<div class="loading">Loading your shop…</div>`;
-  if (admin.draft) return adminTop() + viewEdit();
+  if (admin.draft) return adminTop() + (admin.sub ? viewSubEdit() : viewEdit());
   const d = admin.data;
   const newOrders = d.orders.filter(o => o.status === "New").length, newMsgs = d.messages.filter(m => m.status === "New").length;
   const tab = (k, label, badge) => `<button role="tab" aria-selected="${admin.tab === k}" data-tab="${k}">${label}${badge ? `<span class="badge">${badge}</span>` : ""}</button>`;
@@ -568,50 +570,56 @@ function adminProducts() {
     ${ps.length ? ps.map(p => `<div class="prow">
       ${(p => p ? `<img src="${esc(p)}" alt="">` : `<div class="noimg"></div>`)(photosOf(p)[0] || (p.variants || []).map(v => v.photo).find(Boolean))}
       <div><h3>${esc(p.name)}<span class="status ${p.visible ? "on" : "off"}">${p.visible ? "Showing" : "Hidden"}</span></h3>
-      <div class="meta">${(pr => pr.lo < pr.hi ? `${money(pr.lo)}–${money(pr.hi)}` : `${money(pr.lo)} each`)(priceRange(p))}${hasChoices(p) ? ` · ${plural(p.variants.length, "choice")}${p.variants.some(v => v.soldOut) ? ` (${p.variants.filter(v => v.soldOut).length} sold out)` : ""}` : ""}${hasBulk(p) ? ` · ${p.bulkPct}% off ${p.bulkMin}+` : ""}</div></div>
+      <div class="meta">${(pr => pr.lo < pr.hi ? `${money(pr.lo)}–${money(pr.hi)}` : `${money(pr.lo)} each`)(priceRange(p))}${hasChoices(p) ? ` · ${plural(p.variants.length, "sub-item")}${p.variants.some(v => v.soldOut) ? ` (${p.variants.filter(v => v.soldOut).length} sold out)` : ""}` : ""}${hasBulk(p) ? ` · ${p.bulkPct}% off ${p.bulkMin}+` : ""}</div></div>
       <button class="btn line sm" data-edit="${esc(p.id)}">Edit</button>
     </div>`).join("") : `<div class="empty-state"><h2>No items yet</h2><p>Tap “Add an item” to list your first one.</p></div>`}
   </div>`;
 }
+/* item editor. Sub-items open in their own screen (admin.sub = { i, d }). */
+const sec = (title, sub, body) => `<section class="ed-sec"><div class="ed-h"><h2>${title}</h2>${sub ? `<p class="fine">${sub}</p>` : ""}</div>${body}</section>`;
+function photoTiles(list, k, fileId) { // k: "ph" for the item, "sph" for a sub-item
+  return `<div class="photo-list">${list.map((u, i) => `<div class="photo-tile">
+      <img src="${esc(u)}" alt="Photo ${i + 1}">${i === 0 ? `<span class="main-tag">Main</span>` : `<button type="button" class="mk-main" data-${k}-main="${i}">Make main</button>`}
+      <button type="button" class="x" data-${k}-del="${i}" aria-label="Remove photo ${i + 1}">×</button></div>`).join("")}
+      ${list.length < 10 ? `<label class="photo-add"><span>+</span>${list.length ? "Add more" : "Add photos"}<input type="file" accept="image/*" id="${fileId}" multiple hidden></label>` : ""}
+    </div>`;
+}
+function actionsBar(main, extra) {
+  return `<div class="actions ed-actions ${admin.dirty ? "dirty" : ""}">${main}${extra}<span class="unsaved">Not saved yet</span></div>`;
+}
 function viewEdit() {
   const d = admin.draft, isNew = !d.id, many = d.variants.length > 0;
-  const sec = (title, sub, body, extra = "") => `<section class="ed-sec" ${extra}><div class="ed-h"><h2>${title}</h2>${sub ? `<p class="fine">${sub}</p>` : ""}</div>${body}</section>`;
-  const photos = `<div class="photo-list">${d.photos.map((u, i) => `<div class="photo-tile">
-      <img src="${esc(u)}" alt="Photo ${i + 1}">${i === 0 ? `<span class="main-tag">Main</span>` : `<button type="button" class="mk-main" data-ph-main="${i}">Make main</button>`}
-      <button type="button" class="x" data-ph-del="${i}" aria-label="Remove photo ${i + 1}">×</button></div>`).join("")}
-      ${d.photos.length < 10 ? `<label class="photo-add"><span>+</span>${d.photos.length ? "Add more" : "Add photos"}<input type="file" accept="image/*" id="e-file" multiple hidden></label>` : ""}
-    </div>`;
-  const choice = (v, i) => `<div class="ch-card" data-ch="${i}">
-      <label class="ch-photo" title="${v.photo ? "Change photo" : "Add a photo"}">${v.photo ? `<img src="${esc(v.photo)}" alt="">` : `<span>+</span><small>Photo</small>`}
-        <input type="file" accept="image/*" data-ch-file="${i}" hidden></label>
-      <div class="ch-fields">
-        <input class="input" data-chn="${i}" value="${esc(v.name)}" placeholder="${["e.g. Small", "e.g. Large", "e.g. Gold"][i] || "Name"}" aria-label="Choice ${i + 1} name" enterkeyhint="next">
-        <div class="adorn pre"><span>$</span><input class="input" data-chp="${i}" value="${v.price > 0 ? v.price : ""}" inputmode="decimal" placeholder="${d.price > 0 ? d.price.toFixed(2) : "Price"}" aria-label="Choice ${i + 1} price"></div>
-      </div>
-      <button type="button" class="x" data-ch-del="${i}" aria-label="Remove choice ${i + 1}">×</button>
-      <div class="ch-extra">
-        <input class="input sm" data-chnote="${i}" value="${esc(v.note || "")}" placeholder="Note (optional)" aria-label="Choice ${i + 1} note">
-        <label class="mini-toggle"><input type="checkbox" data-chout="${i}" ${v.soldOut ? "checked" : ""}>Sold out</label>
-        ${v.photo ? `<button type="button" class="textbtn" data-ch-ph-del="${i}">Remove photo</button>` : ""}
+  const subRow = (v, i) => {
+    const price = v.price > 0 ? money(v.price) : d.price > 0 ? `${money(d.price)} <span>(item price)</span>` : `<em class="need">Needs a price</em>`;
+    return `<div class="sub-row">
+      <button type="button" class="sub-open" data-sub-edit="${i}">
+        ${v.photos[0] ? `<img src="${esc(v.photos[0])}" alt="">` : `<span class="noimg"></span>`}
+        <span class="sub-txt"><b>${esc(v.name)}</b><small>${price}${v.photos.length > 1 ? ` · ${v.photos.length} photos` : ""}${v.soldOut ? ` · <em class="out">Sold out</em>` : ""}</small></span>
+        <span class="chev" aria-hidden="true">›</span>
+      </button>
+      <div class="sub-acts">
+        <button type="button" data-sub-dup="${i}" title="Make a copy">Copy</button>
+        ${i > 0 ? `<button type="button" data-sub-up="${i}" aria-label="Move ${esc(v.name)} up" title="Move up">↑</button>` : ""}
       </div>
     </div>`;
+  };
   return `<main class="wrap">
     <button class="back" data-cancel>‹ All items</button>
     <h1 class="page-title" style="margin-top:4px">${isNew ? "Add an item" : "Edit item"}</h1>
     <div class="edit">
       <form class="form-card ed" id="edit" novalidate>
-        ${sec("Photos", "The first photo is the one customers see first.", photos)}
+        ${sec("Photos", "The first photo is the one customers see first.", photoTiles(d.photos, "ph", "e-file"))}
         ${sec("About it", "", `
           <div class="field"><label for="e-name">Name${REQ}</label><input class="input" id="e-name" name="name" value="${esc(d.name)}" placeholder="e.g. Purim Mask Paint Kit"><span class="err" data-err="name"></span></div>
           <div class="field"><label for="e-blurb">Description <span class="opt">Optional</span></label><textarea class="input" id="e-blurb" name="blurb" rows="3" placeholder="What is it, and who is it for?">${esc(d.blurb)}</textarea></div>
           <div class="field"><label for="e-incl">What’s included <span class="opt">Optional, one per line</span></label><textarea class="input" id="e-incl" name="included" rows="3" placeholder="1 plaster donut&#10;3 paint colors">${esc(d.included.join("\n"))}</textarea></div>`)}
-        ${sec("Choices", "Selling it in different sizes, colors or styles? Add each one here with its own price and photo. Customers pick one before adding to cart.", `
-          ${many ? `<div class="field ch-label"><label for="e-label">What are customers choosing?</label><input class="input" id="e-label" name="chooseLabel" value="${esc(d.chooseLabel || "")}" placeholder="Size, Color, Style…" list="labels"><datalist id="labels"><option>Size</option><option>Color</option><option>Style</option><option>Design</option><option>Pack</option></datalist></div>` : ""}
-          <div class="ch-list">${d.variants.map(choice).join("")}</div>
+        ${sec("Sub-items", "Sell this item in different versions: sizes, colors, or both (like “Large – Gold”). Each sub-item is a full listing with its own name, photos, description and price. Customers pick one.", `
+          ${many ? `<div class="field"><label for="e-label">What are customers choosing? <span class="opt">Shows as “Choose a …”</span></label><input class="input" id="e-label" name="chooseLabel" value="${esc(d.chooseLabel || "")}" placeholder="Size, Color, Style, Option…" list="labels" style="max-width:320px"><datalist id="labels"><option>Size</option><option>Color</option><option>Style</option><option>Design</option><option>Option</option></datalist></div>` : ""}
+          ${many ? `<div class="sub-list">${d.variants.map(subRow).join("")}</div>` : ""}
           <span class="err" data-err="variants"></span>
-          <button type="button" class="ch-add" data-ch-add><span>+</span> Add a choice</button>`)}
+          <button type="button" class="ch-add" data-sub-add><span>+</span> Add a sub-item</button>`)}
         ${sec("Price", "", `
-          <div class="field"><label for="e-price">${many ? "Price" : `Price${REQ}`} ${many ? `<span class="opt">Optional: used for any choice without its own price</span>` : ""}</label>
+          <div class="field"><label for="e-price">${many ? "Price" : `Price${REQ}`} ${many ? `<span class="opt">Optional: used by any sub-item without its own price</span>` : ""}</label>
             <div class="adorn pre" style="max-width:220px"><span>$</span><input class="input" id="e-price" name="price" inputmode="decimal" value="${d.price || ""}" placeholder="${many ? "—" : "7.99"}"></div><span class="err" data-err="price"></span></div>
           <details class="ed-more" ${hasBulk(d) ? "open" : ""}><summary>Bulk discount <span class="opt">${hasBulk(d) ? `${d.bulkPct}% off ${d.bulkMin}+` : "Optional"}</span></summary>
             <div class="two">
@@ -621,62 +629,88 @@ function viewEdit() {
             <div class="example" id="example"></div>
           </details>`)}
         <section class="ed-sec"><label class="toggle"><input type="checkbox" name="visible" ${d.visible ? "checked" : ""}>Show on the website</label></section>
-        <div class="actions ed-actions">
-          <button class="btn" type="submit">${isNew ? "Add item" : "Save changes"}</button>
-          <button class="btn line" type="button" data-cancel>Cancel</button>
-          ${isNew ? "" : `<button class="btn danger ${admin.deleteArmed ? "armed" : ""}" type="button" data-delete>${admin.deleteArmed ? "Tap again to delete" : "Delete"}</button>`}
-        </div>
+        ${actionsBar(`<button class="btn" type="submit">${isNew ? "Add item" : "Save changes"}</button>
+          <button class="btn line" type="button" data-cancel>${admin.cancelArmed ? "Tap again to discard" : "Cancel"}</button>`,
+          isNew ? "" : `<button class="btn danger ${admin.deleteArmed ? "armed" : ""}" type="button" data-delete>${admin.deleteArmed ? "Tap again to delete" : "Delete"}</button>`)}
       </form>
       <div class="side"><span class="label">How customers will see it</span><div id="preview" style="max-width:300px"></div></div>
     </div></main>`;
 }
+function viewSubEdit() {
+  const d = admin.draft, s = admin.sub.d, isNew = admin.sub.i < 0;
+  return `<main class="wrap">
+    <button class="back" data-sub-cancel>‹ Back to ${esc(d.name || "the item")}</button>
+    <h1 class="page-title" style="margin-top:4px">${isNew ? "New sub-item" : esc(s.name || "Sub-item")}</h1>
+    <p class="fine" style="margin:-6px 0 16px">Part of <b>${esc(d.name || "this item")}</b>. Customers see these details when they pick this one.</p>
+    <div class="edit">
+      <form class="form-card ed" id="subedit" novalidate>
+        ${sec("Photos", "Shown first when a customer picks this sub-item. Leave empty to show the item’s photos.", photoTiles(s.photos, "sph", "sub-file"))}
+        ${sec("About it", "", `
+          <div class="field"><label for="s-name">Name${REQ}</label><input class="input" id="s-name" name="name" value="${esc(s.name)}" placeholder="e.g. Large, Gold, or Large – Gold"><span class="err" data-err="name"></span></div>
+          <div class="field"><label for="s-blurb">Description <span class="opt">Optional</span></label><textarea class="input" id="s-blurb" name="blurb" rows="3" placeholder="Anything special about this one">${esc(s.blurb)}</textarea></div>
+          <div class="field"><label for="s-incl">What’s included <span class="opt">Optional. Leave empty to use the item’s list</span></label><textarea class="input" id="s-incl" name="included" rows="3" placeholder="${esc(d.included.join("\n"))}">${esc(s.included.join("\n"))}</textarea></div>`)}
+        ${sec("Price", "", `
+          <div class="field"><label for="s-price">Price ${d.price > 0 ? `<span class="opt">Leave empty to use the item price (${money(d.price)})</span>` : REQ}</label>
+            <div class="adorn pre" style="max-width:220px"><span>$</span><input class="input" id="s-price" name="price" inputmode="decimal" value="${s.price > 0 ? s.price : ""}" placeholder="${d.price > 0 ? d.price.toFixed(2) : "9.99"}"></div><span class="err" data-err="price"></span></div>
+          <label class="toggle"><input type="checkbox" name="soldOut" ${s.soldOut ? "checked" : ""}><span>Sold out<small class="toggle-hint">Customers still see it, but can’t pick it</small></span></label>`)}
+        ${actionsBar(`<button class="btn" type="submit">Done</button><button class="btn line" type="button" data-sub-cancel>Cancel</button>`,
+          isNew ? "" : `<button class="btn danger ${admin.subDelArmed ? "armed" : ""}" type="button" data-sub-delete>${admin.subDelArmed ? "Tap again to remove" : "Remove"}</button>`)}
+      </form>
+    </div></main>`;
+}
 const numIn = s => parseFloat(String(s).replace(/[^\d.]/g, ""));
+const lines = t => t.split("\n").map(s => s.trim()).filter(Boolean);
 function readDraft() {
   const f = document.getElementById("edit"); if (!f) return;
   const d = admin.draft, v = n => f.elements[n] ? f.elements[n].value : "";
-  d.name = v("name"); d.blurb = v("blurb");
-  d.included = v("included").split("\n").map(s => s.trim()).filter(Boolean);
+  d.name = v("name"); d.blurb = v("blurb"); d.included = lines(v("included"));
   d.price = r2(numIn(v("price")) || 0);
   d.bulkMin = parseInt(v("bulkMin")) || 0;
   d.bulkPct = Math.min(90, Math.max(0, parseFloat(v("bulkPct")) || 0));
   d.visible = f.elements.visible.checked;
   if (f.elements.chooseLabel) d.chooseLabel = v("chooseLabel").trim();
-  d.variants.forEach((c, i) => {
-    const q = a => f.querySelector(`[${a}="${i}"]`);
-    if (!q("data-chn")) return;
-    c.name = q("data-chn").value.trim(); c.price = r2(numIn(q("data-chp").value)) || null;
-    c.note = q("data-chnote").value.trim(); c.soldOut = q("data-chout").checked;
-  });
   d.photo = d.photos[0] || "";
 }
-const emptyChoice = c => !c.name && !(c.price > 0) && !c.photo && !c.note;
+function readSub() {
+  const f = document.getElementById("subedit"); if (!f || !admin.sub) return;
+  const s = admin.sub.d;
+  s.name = f.elements.name.value.trim(); s.blurb = f.elements.blurb.value.trim(); s.included = lines(f.elements.included.value);
+  s.price = r2(numIn(f.elements.price.value)) || null; s.soldOut = f.elements.soldOut.checked; s.photo = s.photos[0] || "";
+}
 function updatePreview() {
+  if (!document.getElementById("edit")) return;
   readDraft(); const d = admin.draft;
-  const shown = { ...d, name: d.name || "Item name", variants: d.variants.filter(c => !emptyChoice(c)) };
-  document.getElementById("preview").innerHTML = card(shown, true);
-  document.querySelectorAll("[data-chp]").forEach(el => el.placeholder = d.price > 0 ? d.price.toFixed(2) : "Price");
-  const ex = document.getElementById("example"), base = priceRange(shown).lo;
-  if (!(base > 0)) ex.textContent = "Set a price to see what customers will pay.";
-  else if (hasBulk(d)) ex.textContent = `Order ${d.bulkMin} or more${hasChoices(shown) ? " (any mix of choices)" : ""} and each one is ${d.bulkPct}% off${hasChoices(shown) && priceRange(shown).lo < priceRange(shown).hi ? "" : `: ${money(r2(base * (1 - d.bulkPct / 100)))} instead of ${money(base)}`}.`;
+  document.getElementById("preview").innerHTML = card({ ...d, name: d.name || "Item name" }, true);
+  const ex = document.getElementById("example"), pr = priceRange(d);
+  if (!(pr.lo > 0)) ex.textContent = "Set a price to see what customers will pay.";
+  else if (hasBulk(d)) ex.textContent = `Order ${d.bulkMin} or more${hasChoices(d) ? " (any mix of sub-items)" : ""} and each one is ${d.bulkPct}% off${pr.lo < pr.hi ? "" : `: ${money(r2(pr.lo * (1 - d.bulkPct / 100)))} instead of ${money(pr.lo)}`}.`;
   else ex.textContent = "Fill in both boxes to give a discount on bigger orders.";
+}
+function markDirty() { admin.dirty = true; admin.cancelArmed = false; document.querySelector(".ed-actions")?.classList.add("dirty"); }
+function openSub(i, d) { readDraft(); admin.sub = { i, d }; admin.subDelArmed = false; render(); }
+function saveSub(form) {
+  readSub(); const s = admin.sub.d, d = admin.draft, errs = {};
+  if (!s.name) errs.name = "Give it a name, like Large or Gold.";
+  else if (d.variants.some((v, j) => j !== admin.sub.i && v.name.toLowerCase() === s.name.toLowerCase())) errs.name = "Another sub-item already has this name.";
+  if (!(s.price > 0) && !(d.price > 0)) errs.price = "Enter a price. (The item has no price of its own.)";
+  if (showErrs(form, errs)) return;
+  if (admin.sub.i < 0) d.variants.push(s); else d.variants[admin.sub.i] = s;
+  const isNewItem = !d.id; admin.sub = null; admin.dirty = true; render();
+  toast(`${s.name} is ready. Tap “${isNewItem ? "Add item" : "Save changes"}” to publish.`);
 }
 async function saveProduct(form) {
   readDraft(); const d = admin.draft, errs = {};
-  d.variants = d.variants.filter(c => !emptyChoice(c));
-  const names = d.variants.map(c => c.name.toLowerCase());
   if (!d.name.trim()) errs.name = "Give the item a name.";
-  if (d.variants.some(c => !c.name)) errs.variants = "Give every choice a name, or remove the empty one.";
-  else if (new Set(names).size < names.length) errs.variants = "Two choices have the same name.";
-  else if (!d.variants.length && !(d.price > 0)) errs.price = "Enter a price, like 7.99.";
-  else if (d.variants.some(c => !(priceOf(d, c) > 0))) errs.variants = `Give ${(d.variants.find(c => !(priceOf(d, c) > 0)).name)} a price, or set one price for the whole item.`;
-  if (Object.keys(errs).length) { render(true); showErrs(document.getElementById("edit"), errs); document.querySelector("#edit .err:not(:empty)")?.scrollIntoView({ behavior: "smooth", block: "center" }); return; }
+  if (!d.variants.length && !(d.price > 0)) errs.price = "Enter a price, like 7.99.";
+  else if (d.variants.some(c => !(priceOf(d, c) > 0))) errs.variants = `${d.variants.find(c => !(priceOf(d, c) > 0)).name} needs a price. Open it and add one, or set a price for the whole item.`;
+  if (showErrs(form, errs)) { form.querySelector(".err:not(:empty)")?.scrollIntoView({ behavior: "smooth", block: "center" }); return; }
   if (admin.busy) return;
   const btn = form.querySelector('button[type="submit"]'); admin.busy = true; setBusy(btn, true, "Saving…");
   try {
     await api("POST", "/api/admin/products", d);
-    const wasNew = !d.id; admin.draft = null; await loadAdmin(); window.scrollTo(0, 0);
+    const wasNew = !d.id; admin.draft = null; admin.dirty = false; await loadAdmin(); window.scrollTo(0, 0);
     toast(wasNew ? "Item added" : "Changes saved");
-  } catch (e) { if (e.errors) showErrs(document.getElementById("edit") || form, e.errors); adminFail(e); }
+  } catch (e) { if (e.errors) showErrs(form, e.errors); adminFail(e); }
   finally { admin.busy = false; setBusy(btn, false); }
 }
 
@@ -960,14 +994,26 @@ document.addEventListener("click", async e => {
   if (ds.tab) { admin.tab = ds.tab; admin.sdraft = null; admin.ddraft = null; render(true); if (ds.tab === "analytics") loadAnalytics(); return; }
   if (ds.range) { admin.anRange = ds.range; loadAnalytics(); return; }
   if ("anRefresh" in ds) { loadAnalytics(); return; }
-  if ("new" in ds) { admin.draft = { id: null, name: "", blurb: "", included: [], price: 0, bulkMin: 0, bulkPct: 0, visible: true, photo: "", photos: [], variants: [], chooseLabel: "" }; admin.deleteArmed = false; render(); return; }
-  if ("chAdd" in ds) { readDraft(); admin.draft.variants.push({ id: "", name: "", price: null, photo: "", note: "", soldOut: false }); render(true); document.querySelector(`[data-chn="${admin.draft.variants.length - 1}"]`)?.focus(); return; }
-  if (ds.chDel !== undefined) { readDraft(); admin.draft.variants.splice(Number(ds.chDel), 1); render(true); return; }
-  if (ds.chPhDel !== undefined) { readDraft(); admin.draft.variants[Number(ds.chPhDel)].photo = ""; render(true); return; }
-  if (ds.phDel !== undefined) { readDraft(); admin.draft.photos.splice(Number(ds.phDel), 1); render(true); return; }
-  if (ds.phMain !== undefined) { readDraft(); const ph = admin.draft.photos; ph.unshift(...ph.splice(Number(ds.phMain), 1)); render(true); return; }
-  if (ds.edit) { const src = admin.data.products.find(p => p.id === ds.edit); admin.draft = { variants: [], chooseLabel: "", ...structuredClone(src), photos: photosOf(src) }; admin.deleteArmed = false; render(); return; }
-  if ("cancel" in ds) { admin.draft = null; render(); return; }
+  if ("new" in ds) { admin.draft = { id: null, name: "", blurb: "", included: [], price: 0, bulkMin: 0, bulkPct: 0, visible: true, photo: "", photos: [], variants: [], chooseLabel: "" }; admin.sub = null; admin.dirty = false; admin.cancelArmed = false; admin.deleteArmed = false; render(); return; }
+  if (ds.phDel !== undefined) { readDraft(); admin.draft.photos.splice(Number(ds.phDel), 1); admin.dirty = true; render(true); return; }
+  if (ds.phMain !== undefined) { readDraft(); const ph = admin.draft.photos; ph.unshift(...ph.splice(Number(ds.phMain), 1)); admin.dirty = true; render(true); return; }
+  if (ds.sphDel !== undefined) { readSub(); admin.sub.d.photos.splice(Number(ds.sphDel), 1); render(true); return; }
+  if (ds.sphMain !== undefined) { readSub(); const ph = admin.sub.d.photos; ph.unshift(...ph.splice(Number(ds.sphMain), 1)); render(true); return; }
+  if ("subAdd" in ds) { openSub(-1, { id: "", name: "", price: null, photos: [], photo: "", blurb: "", included: [], soldOut: false }); return; }
+  if (ds.subEdit !== undefined) { const i = Number(ds.subEdit); openSub(i, structuredClone(admin.draft.variants[i])); return; }
+  if (ds.subDup !== undefined) { const v = structuredClone(admin.draft.variants[Number(ds.subDup)]); openSub(-1, { ...v, id: "", name: v.name + " (copy)" }); setTimeout(() => document.getElementById("s-name")?.select(), 0); return; }
+  if (ds.subUp !== undefined) { readDraft(); const vs = admin.draft.variants, i = Number(ds.subUp); [vs[i - 1], vs[i]] = [vs[i], vs[i - 1]]; admin.dirty = true; render(true); return; }
+  if ("subCancel" in ds) { admin.sub = null; render(); return; }
+  if ("subDelete" in ds) {
+    if (!admin.subDelArmed) { readSub(); admin.subDelArmed = true; render(true); return; }
+    const name = admin.draft.variants[admin.sub.i].name; admin.draft.variants.splice(admin.sub.i, 1); admin.sub = null; admin.dirty = true; render();
+    toast(`${name} removed. Tap “Save changes” to publish.`); return;
+  }
+  if (ds.edit) { const src = admin.data.products.find(p => p.id === ds.edit); admin.draft = { variants: [], chooseLabel: "", ...structuredClone(src), photos: photosOf(src) }; admin.sub = null; admin.dirty = false; admin.cancelArmed = false; admin.deleteArmed = false; render(); return; }
+  if ("cancel" in ds) {
+    if (admin.dirty && !admin.cancelArmed) { readDraft(); admin.cancelArmed = true; render(true); return; }
+    admin.draft = null; admin.dirty = false; admin.cancelArmed = false; render(); return;
+  }
   if ("delete" in ds) {
     if (!admin.deleteArmed) { readDraft(); admin.deleteArmed = true; render(true); return; }
     try { await api("DELETE", `/api/admin/products/${encodeURIComponent(admin.draft.id)}`); admin.draft = null; admin.deleteArmed = false; await loadAdmin(); toast("Product deleted"); }
@@ -1011,7 +1057,7 @@ document.addEventListener("input", e => {
   }
   if ("qty" in t.dataset && t.dataset.ctx === "pq") { const n = parseInt(t.value); if (n >= 1) setQty("pq", t.dataset.id, n); }
   if (t.id === "c-zip") checkZip(t.value.trim());
-  if (t.closest("#edit") && t.type !== "file") updatePreview();
+  if (t.closest("#edit") && t.type !== "file") { updatePreview(); markDirty(); }
   if (t.closest("#season") && t.type !== "file") updateSeasonPreview();
   if (t.dataset.ring !== undefined) { const v = parseFloat(t.value); admin.ddraft.rings[Number(t.dataset.ring)][t.dataset.k] = Number.isFinite(v) ? v : 0; }
   if (t.dataset.zone) { const z = admin.ddraft.zones[t.dataset.zone]; const v = parseFloat(t.value); if (z && v >= 0) { z.fee = r2(v); z.manual = true; } }
@@ -1020,12 +1066,7 @@ document.addEventListener("change", async e => {
   const t = e.target;
   if ("qty" in t.dataset) { const n = parseInt(t.value); t.value = setQty(t.dataset.ctx, t.dataset.id, n >= 1 ? n : 1); }
   if ("choice" in t.dataset && t.dataset.pid) { ui.sel[t.dataset.pid] = t.value; ui.photo[t.dataset.pid] = 0; render(true); document.querySelector(`[data-choice][value="${CSS.escape(t.value)}"]`)?.focus({ preventScroll: true }); }
-  if (t.dataset.chFile !== undefined && t.files[0]) {
-    readDraft(); const c = admin.draft.variants[Number(t.dataset.chFile)];
-    toast("Uploading photo…");
-    try { c.photo = await uploadPhoto(t.files[0], 1400); render(true); toast("Photo added. Remember to save."); }
-    catch (err) { if (err.status) adminFail(err); else toast("That photo couldn’t be opened. Try a JPG or PNG."); }
-  }
+
   if (t.name === "method") {
     ui.method = t.value; document.getElementById("addr").hidden = t.value !== "delivery";
     refreshSummary("checkout");
@@ -1037,19 +1078,20 @@ document.addEventListener("change", async e => {
     try { await api("PATCH", `/api/admin/${kind}/${encodeURIComponent(item.id)}`, { status: t.value }); render(true); toast(`Marked ${t.value.toLowerCase()}`); }
     catch (err) { item.status = prev; render(true); adminFail(err); }
   }
-  if (t.closest("#edit") && t.type === "checkbox") updatePreview();
+  if (t.closest("#edit") && t.type === "checkbox") { updatePreview(); markDirty(); }
   if (t.closest("#season") && (t.type === "checkbox" || t.type === "radio" || t.tagName === "SELECT")) updateSeasonPreview();
-  if (t.id === "e-file" && t.files.length) {
-    readDraft();
-    const d = admin.draft, files = [...t.files].slice(0, 10 - d.photos.length);
+  if ((t.id === "e-file" || t.id === "sub-file") && t.files.length) {
+    const isSub = t.id === "sub-file"; if (isSub) readSub(); else readDraft();
+    const d = isSub ? admin.sub.d : admin.draft, files = [...t.files].slice(0, 10 - d.photos.length);
     toast(files.length > 1 ? `Uploading ${files.length} photos…` : "Uploading photo…");
     let added = 0;
     for (const file of files) {
       try { d.photos.push(await uploadPhoto(file, 1400)); added++; }
       catch (err) { if (err.status) adminFail(err); else toast("A photo couldn’t be opened. Try a JPG or PNG."); break; }
     }
-    if (admin.draft === d) { d.photo = d.photos[0] || ""; render(true); }
-    if (added) toast(`${added > 1 ? added + " photos" : "Photo"} uploaded. Remember to save.`);
+    d.photo = d.photos[0] || ""; if (!isSub) admin.dirty = true;
+    if (isSub ? admin.sub && admin.sub.d === d : admin.draft === d) render(true);
+    if (added) toast(`${added > 1 ? added + " photos" : "Photo"} uploaded. ${isSub ? "Tap Done when you’re finished." : "Remember to save."}`);
     if (t.files.length > files.length) toast("You can add up to 10 photos per item.");
   }
   if (t.id === "s-file" && t.files[0]) {
@@ -1062,14 +1104,6 @@ document.addEventListener("change", async e => {
   }
 });
 document.addEventListener("keydown", e => {
-  const t = e.target;
-  if (e.key === "Enter" && t.dataset && (t.dataset.chn !== undefined || t.dataset.chp !== undefined)) {
-    e.preventDefault(); const i = Number(t.dataset.chn ?? t.dataset.chp);
-    if (t.dataset.chn !== undefined) { document.querySelector(`[data-chp="${i}"]`)?.focus(); return; }
-    readDraft();
-    if (i === admin.draft.variants.length - 1) { admin.draft.variants.push({ id: "", name: "", price: null, photo: "", note: "", soldOut: false }); render(true); }
-    document.querySelector(`[data-chn="${i + 1}"]`)?.focus(); return;
-  }
   if (e.key === "Escape" && (ui.searchOpen || ui.query)) { ui.searchOpen = false; ui.query = ""; render(true); }
 });
 document.addEventListener("submit", async e => {
@@ -1087,6 +1121,7 @@ document.addEventListener("submit", async e => {
     return;
   }
   if (f.id === "edit") return saveProduct(f);
+  if (f.id === "subedit") return saveSub(f);
   if (f.id === "season") {
     readSeason();
     try { const res = await api("PUT", "/api/admin/season", admin.sdraft); admin.data.season = res.season; admin.sdraft = null; render(true); toast("Seasonal look saved"); }
