@@ -490,11 +490,6 @@ footer a{font-weight:600}
 /* custom-order listings (pick a count, a color swatch, and type the name) */
 .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 .cust{display:grid;gap:18px}
-.cnt-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(62px,1fr));gap:8px}
-.cnt-grid .ch-box{justify-content:center;padding:8px 4px;text-align:center}
-.cnt-grid .ch-txt{justify-items:center}
-.cnt-grid .ch-txt b{font-size:17px}
-.cust-note{margin-top:8px}
 .sw-grid{display:flex;flex-wrap:wrap;gap:14px;padding:4px}
 .csw{position:relative;cursor:pointer;display:block}
 .csw input{position:absolute;opacity:0;pointer-events:none}
@@ -521,3 +516,11 @@ footer a{font-weight:600}
 .ctext-total{display:block;margin-top:6px;font-size:13.5px;color:var(--muted)}
 .ctext-total b{color:var(--ink)}
 .ctext-count:empty{display:none}
+.cust .err{margin-top:-6px}
+.cprice{color:var(--brand);font-size:15px}
+.cwarn{color:var(--err);font-weight:700}
+.csets{display:grid;gap:12px}
+.cset{display:grid;gap:10px;border:1.5px solid var(--line);border-radius:16px;padding:12px 14px 14px;background:var(--surface)}
+.cset-head{display:flex;gap:8px;align-items:flex-end}
+.cset-head .x{width:44px;height:50px;border-radius:12px;border:1.5px solid var(--line);background:var(--surface);color:var(--muted);font-size:20px;line-height:1;flex:none}
+.cset-head .x:hover{color:var(--err);border-color:var(--err)}

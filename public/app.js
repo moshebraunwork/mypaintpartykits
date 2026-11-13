@@ -41,31 +41,36 @@ const hasChoices = p => (p.variants || []).length > 0;
 const choiceOf = (p, vid) => (p.variants || []).find(v => v.id === vid) || null;
 const priceOf = (p, v) => (v && v.price > 0 ? v.price : p.price);
 const chooseWord = p => (p.chooseLabel || "option").trim().toLowerCase();
-/* Custom-order listings (e.g. name clickers): p.custom = { unit, min, max, included, extra, colors, askText, textLabel }.
-   The customer picks how many units (letters), a color (shown only as a swatch), and may type the text.
-   The item's price covers up to `included` units; each one over that adds `extra`. A cart line keeps c = { n, color, text }. */
+/* Custom-order listings (e.g. name clickers): p.custom = { unit, min, max, included, extra, textLabel, colorSets: [{ label, colors }] }.
+   The customer types the text (a name); every character, spaces included, is one unit (letter). The item's price covers
+   up to `included` units and each one over adds `extra`. Then they pick one color (a swatch, no name) for each color choice,
+   e.g. "Base & letter color" and "Keys color". A cart line keeps c = { text, colors: [one per color choice] }. */
 const isCustom = p => !!(p && p.custom);
 const unitsWord = (c, n) => n === 1 ? c.unit : /(s|x|z|ch|sh)$/i.test(c.unit) ? c.unit + "es" : c.unit + "s";
 const customPrice = (p, n) => r2(p.price + Math.max(0, n - p.custom.included) * p.custom.extra);
 const cleanText = t => String(t || "").trim().replace(/\s+/g, " ");
 const letterCount = t => [...cleanText(t)].length; // spaces and symbols count as letters too
-// what gets counted, one box per character, so customers can see that a space is one too
-function countDetail(cu, t) {
-  const chars = [...cleanText(t)], k = chars.length, sp = chars.filter(ch => ch === " ").length;
+const custSel = id => (ui.cust[id] ||= { text: "", colors: [] });
+const setLabel = s => s.label || "Color";
+// what gets counted, one box per character, so customers can see that a space is one too, and what it costs
+function countDetail(p, t) {
+  const cu = p.custom, chars = [...cleanText(t)], k = chars.length, sp = chars.filter(ch => ch === " ").length;
   if (!k) return "";
+  const note = k > cu.max ? `<span class="cwarn">Too long: the most is ${cu.max} ${esc(unitsWord(cu, cu.max))}.</span>`
+    : k < cu.min ? `<span class="cwarn">Too short: at least ${cu.min} ${esc(unitsWord(cu, cu.min))}.</span>` : `<b class="cprice">${money(customPrice(p, k))}</b>`;
   return `<span class="ctiles" aria-hidden="true">${chars.map(ch => ch === " " ? `<i class="sp">space</i>` : `<i>${esc(ch)}</i>`).join("")}</span>
-    <span class="ctext-total"><b>${k} ${esc(unitsWord(cu, k))}</b>${sp ? ` (including ${plural(sp, "space")})` : ""}${k > cu.max ? ` · too long, the most is ${cu.max}` : ""}</span>`;
+    <span class="ctext-total"><b>${k} ${esc(unitsWord(cu, k))}</b>${sp ? ` (including ${plural(sp, "space")})` : ""} = ${note}</span>`;
 }
-const custSel = id => (ui.cust[id] ||= { n: 0, color: "", text: "" });
 function customOk(p, c) {
-  const cu = p.custom;
-  return !!c && Number.isInteger(c.n) && c.n >= cu.min && c.n <= cu.max && (!cu.colors.length || cu.colors.includes(c.color))
-    && (!cu.askText || (!!c.text && letterCount(c.text) <= c.n));
+  const cu = p.custom, k = c && letterCount(c.text);
+  return !!c && k >= cu.min && k <= cu.max && Array.isArray(c.colors) && cu.colorSets.every((s, i) => s.colors.includes(c.colors[i]));
 }
 const cdot = hex => `<i class="cdot" style="background:${esc(hex)}"></i>`;
-// c = { n, unit, color, text }; showHex: print the color code too (owner views)
-const customHTML = (c, showHex) => [`${c.n} ${esc(c.unit)}`, c.color ? cdot(c.color) + (showHex ? " " + esc(c.color) : `<span class="sr">color ${esc(c.color)}</span>`) : "", c.text ? `“${esc(c.text)}”` : ""].filter(Boolean).join(" · ");
-const CUSTOM_DEFAULT = { unit: "letter", min: 1, max: 12, included: 4, extra: 1, colors: [], askText: true, textLabel: "Name" };
+// c = { n, unit, text, colors: [{ label, color }] } (older orders: c.color); showHex: print the color codes too (owner views)
+const customHTML = (c, showHex) => [c.text ? `“${esc(c.text)}”` : "", `${c.n} ${esc(c.unit)}`,
+  ...(c.colors || (c.color ? [{ label: "Color", color: c.color }] : [])).map(x => `${esc(x.label)}: ${cdot(x.color)}${showHex ? " " + esc(x.color) : `<span class="sr">${esc(x.color)}</span>`}`)
+].filter(Boolean).join(" · ");
+const CUSTOM_DEFAULT = { unit: "letter", min: 1, max: 12, included: 4, extra: 1, textLabel: "Name", colorSets: [{ label: "Color", colors: [] }] };
 function priceRange(p) {
   if (isCustom(p)) return { lo: customPrice(p, p.custom.min), hi: customPrice(p, p.custom.max) };
   if (!hasChoices(p)) return { lo: p.price, hi: p.price };
@@ -73,7 +78,7 @@ function priceRange(p) {
   return { lo: Math.min(...list), hi: Math.max(...list) };
 }
 const choiceText = (label, name) => name ? (label ? `${label}: ${name}` : name) : "";
-const lineKey = l => l.id + "|" + (l.v || "") + (l.c ? "|" + JSON.stringify([l.c.n, l.c.color || "", l.c.text || ""]) : "");
+const lineKey = l => l.id + "|" + (l.v || "") + (l.c ? "|" + JSON.stringify([l.c.text || "", l.c.colors || []]) : "");
 const itemRoute = r => r.startsWith("item-") ? r.slice(5) : r.startsWith("kit-") ? r.slice(4) : null; // old "kit-" links keep working
 const REQ = `<span class="req" aria-hidden="true">*</span>`;
 const REQ_NOTE = `<p class="fine" style="margin-top:-6px">Fields marked <span class="req" style="margin:0">*</span> are required.</p>`;
@@ -182,7 +187,8 @@ function cartLines() {
   const lines = cart.map(l => ({ ...l, key: lineKey(l), p: findP(l.id) })).filter(l => l.p), per = {};
   lines.forEach(l => per[l.id] = (per[l.id] || 0) + l.qty);
   lines.forEach(l => { l.bulkQty = per[l.id]; l.choice = choiceOf(l.p, l.v); l.each = priceOf(l.p, l.choice); }); // bulk counts every choice of an item together
-  lines.forEach(l => { if (isCustom(l.p) && l.c) { l.each = customPrice(l.p, l.c.n); l.cu = { ...l.c, unit: unitsWord(l.p.custom, l.c.n) }; } });
+  lines.forEach(l => { if (isCustom(l.p) && l.c) { const n = letterCount(l.c.text); l.each = customPrice(l.p, n);
+    l.cu = { n, unit: unitsWord(l.p.custom, n), text: l.c.text, colors: l.p.custom.colorSets.map((s, i) => ({ label: setLabel(s), color: l.c.colors[i] })) }; } });
   return lines;
 }
 function cartCount() { return cartLines().reduce((s, l) => s + l.qty, 0); }
@@ -268,7 +274,7 @@ function card(p, preview) {
   const go = preview ? `tabindex="-1"` : `data-go="item-${esc(p.id)}"`, choose = hasChoices(p) || isCustom(p);
   const ph = photosOf(p)[0] || (p.variants || []).map(v => v.photo).find(Boolean);
   const n = (p.variants || []).length, word = p.chooseLabel ? chooseWord(p) + (n === 1 ? "" : /s$/.test(chooseWord(p)) ? "" : "s") : (n === 1 ? "choice" : "choices");
-  const optHint = isCustom(p) ? (p.custom.colors.length > 1 ? `${p.custom.colors.length} colors` : "Personalized") : choose ? `${n} ${esc(word)}` : "";
+  const optHint = isCustom(p) ? "Personalized" : choose ? `${n} ${esc(word)}` : "";
   return `<article class="card">
     <button class="ph" ${go} aria-label="View ${esc(p.name)}">${ph ? `<img src="${esc(ph)}" alt="" loading="lazy">` : ""}</button>
     <div class="body">
@@ -335,39 +341,30 @@ function viewProduct(id) {
     </div></div>`);
 }
 function customChooser(p) {
-  const cu = p.custom, s = custSel(p.id), counts = [];
-  for (let n = cu.min; n <= cu.max; n++) counts.push(n);
-  const pid = esc(p.id), many = unitsWord(cu, 2);
+  const cu = p.custom, s = custSel(p.id), pid = esc(p.id), lbl = esc(cu.textLabel);
   return `<div class="choose cust">
-    <fieldset class="choose"><legend class="label">How many ${esc(many)}?${REQ}<span class="opt-chosen" id="cntChosen">${s.n ? esc(`${s.n} ${unitsWord(cu, s.n)}`) : ""}</span></legend>
-      <div class="cnt-grid">${counts.map(n => `<label class="ch"><input type="radio" name="cnt" value="${n}" data-cnt data-pid="${pid}" ${s.n === n ? "checked" : ""}>
-        <span class="ch-box"><span class="ch-txt"><b>${n}</b><small>${money(customPrice(p, n))}</small></span></span></label>`).join("")}</div>
-      ${cu.extra > 0 && cu.included < cu.max ? `<p class="fine cust-note">${money(p.price)} includes up to ${cu.included} ${esc(unitsWord(cu, cu.included))}. Each extra ${esc(cu.unit)} is ${money(cu.extra)}.</p>` : ""}
-    </fieldset>
-    ${cu.colors.length ? `<fieldset class="choose"><legend class="label">Color${REQ}<span class="opt-chosen" id="colorChosen">${s.color ? cdot(s.color) : ""}</span></legend>
-      <div class="sw-grid">${cu.colors.map((h, i) => `<label class="csw"><input type="radio" name="ccolor" value="${esc(h)}" data-color data-pid="${pid}" aria-label="Color ${i + 1} of ${cu.colors.length}" ${s.color === h ? "checked" : ""}><span style="background:${esc(h)}"></span></label>`).join("")}</div>
-    </fieldset>` : ""}
-    ${cu.askText ? `<div class="field"><label class="label" for="ctext" style="margin:0">${esc(cu.textLabel)}${REQ}</label>
+    <div class="field"><label class="label" for="ctext" style="margin:0">${lbl}${REQ}</label>
       <input class="input" id="ctext" data-ctext data-pid="${pid}" value="${esc(s.text)}" maxlength="80" autocomplete="off" placeholder="Type the ${esc(cu.textLabel.toLowerCase())}">
-      <span class="fine" id="ctHint">Every character counts as a ${esc(cu.unit)}, including spaces and symbols (like - or &amp;).</span>
-      <div class="ctext-count" id="ctCount" aria-live="polite">${countDetail(cu, s.text)}</div></div>` : ""}
+      <span class="fine">${cu.extra > 0 && cu.included < cu.max ? `${money(p.price)} includes up to ${cu.included} ${esc(unitsWord(cu, cu.included))}. Each extra ${esc(cu.unit)} is ${money(cu.extra)}. ` : ""}Every character counts as a ${esc(cu.unit)}, including spaces and symbols (like - or &amp;).</span>
+      <div class="ctext-count" id="ctCount" aria-live="polite">${countDetail(p, s.text)}</div></div>
+    ${cu.colorSets.map((set, si) => `<fieldset class="choose"><legend class="label">${esc(setLabel(set))}${REQ}<span class="opt-chosen" id="colorChosen${si}">${s.colors[si] ? cdot(s.colors[si]) : ""}</span></legend>
+      <div class="sw-grid">${set.colors.map((h, i) => `<label class="csw"><input type="radio" name="ccolor${si}" value="${esc(h)}" data-color="${si}" data-pid="${pid}" aria-label="${esc(setLabel(set))}, color ${i + 1} of ${set.colors.length}" ${s.colors[si] === h ? "checked" : ""}><span style="background:${esc(h)}"></span></label>`).join("")}</div>
+    </fieldset>`).join("")}
     <span class="err" id="chErr"></span>
   </div>`;
 }
-function updateCustom(id) { // refresh the chosen labels without redrawing (keeps typing focus)
-  const p = findP(id), s = custSel(id), cu = p.custom;
-  document.querySelectorAll("[data-cnt]").forEach(r => r.checked = Number(r.value) === s.n);
-  const cc = document.getElementById("cntChosen"); if (cc) cc.textContent = s.n ? `${s.n} ${unitsWord(cu, s.n)}` : "";
-  const co = document.getElementById("colorChosen"); if (co) co.innerHTML = s.color ? cdot(s.color) : "";
-  const ct = document.getElementById("ctCount");
-  if (ct) ct.innerHTML = countDetail(cu, s.text);
+function updateCustom(id) { // refresh without redrawing (keeps typing focus)
+  const p = findP(id), s = custSel(id);
+  p.custom.colorSets.forEach((_, si) => { const co = document.getElementById("colorChosen" + si); if (co) co.innerHTML = s.colors[si] ? cdot(s.colors[si]) : ""; });
+  const ct = document.getElementById("ctCount"); if (ct) ct.innerHTML = countDetail(p, s.text);
   const err = document.getElementById("chErr"); if (err) err.textContent = "";
   updateProduct(id);
 }
 function updateProduct(id) {
   const p = findP(id); if (!p) return;
   const q = ui.qty[id] || 1, inCart = cart.filter(l => l.id === id).reduce((s, l) => s + l.qty, 0);
-  const v = choiceOf(p, ui.sel[id]), pr = priceRange(p), cn = isCustom(p) ? custSel(id).n : 0;
+  const v = choiceOf(p, ui.sel[id]), pr = priceRange(p), ck = isCustom(p) ? letterCount(custSel(id).text) : 0;
+  const cn = ck >= (isCustom(p) ? p.custom.min : 1) && ck <= (isCustom(p) ? p.custom.max : 0) ? ck : 0;
   const each = cn ? customPrice(p, cn) : v ? priceOf(p, v) : pr.lo;
   const r = priceFor(p, q, q + inCart, each), n = nudgeText(p, q + inCart);
   document.getElementById("bigPrice").innerHTML = (!v && !cn && pr.lo < pr.hi ? `<small>From</small> ` : "") + `${money(each)} <small>each</small>`;
@@ -631,7 +628,7 @@ function adminProducts() {
     ${ps.length ? ps.map(p => `<div class="prow">
       ${(p => p ? `<img src="${esc(p)}" alt="">` : `<div class="noimg"></div>`)(photosOf(p)[0] || (p.variants || []).map(v => v.photo).find(Boolean))}
       <div><h3>${esc(p.name)}<span class="status ${p.visible ? "on" : "off"}">${p.visible ? "Showing" : "Hidden"}</span></h3>
-      <div class="meta">${isCustom(p) ? `Custom order · ${money(p.price)} for up to ${p.custom.included} ${esc(unitsWord(p.custom, p.custom.included))}${p.custom.extra > 0 ? `, +${money(p.custom.extra)} each extra` : ""}${p.custom.colors.length ? ` · ${plural(p.custom.colors.length, "color")}` : ""}` : (pr => pr.lo < pr.hi ? `${money(pr.lo)}–${money(pr.hi)}` : `${money(pr.lo)} each`)(priceRange(p))}${hasChoices(p) ? ` · ${plural(p.variants.length, "sub-item")}${p.variants.some(v => v.soldOut) ? ` (${p.variants.filter(v => v.soldOut).length} sold out)` : ""}` : ""}${hasBulk(p) ? ` · ${p.bulkPct}% off ${p.bulkMin}+` : ""}</div></div>
+      <div class="meta">${isCustom(p) ? `Custom order · ${money(p.price)} for up to ${p.custom.included} ${esc(unitsWord(p.custom, p.custom.included))}${p.custom.extra > 0 ? `, +${money(p.custom.extra)} each extra` : ""}${p.custom.colorSets.length ? ` · ${p.custom.colorSets.map(x => esc(setLabel(x))).join(", ")}` : ""}` : (pr => pr.lo < pr.hi ? `${money(pr.lo)}–${money(pr.hi)}` : `${money(pr.lo)} each`)(priceRange(p))}${hasChoices(p) ? ` · ${plural(p.variants.length, "sub-item")}${p.variants.some(v => v.soldOut) ? ` (${p.variants.filter(v => v.soldOut).length} sold out)` : ""}` : ""}${hasBulk(p) ? ` · ${p.bulkPct}% off ${p.bulkMin}+` : ""}</div></div>
       <button class="btn line sm" data-edit="${esc(p.id)}">Edit</button>
     </div>`).join("") : `<div class="empty-state"><h2>No items yet</h2><p>Tap “Add an item” to list your first one.</p></div>`}
   </div>`;
@@ -671,7 +668,7 @@ function viewEdit() {
       <form class="form-card ed" id="edit" novalidate>
         ${sec("Type of listing", "", `<div class="choice kind">
           <label><input type="radio" name="kind" value="regular" ${cu ? "" : "checked"}><span>Regular item<small>One price, or sub-items like sizes</small></span></label>
-          <label><input type="radio" name="kind" value="custom" ${cu ? "checked" : ""}><span>Custom order<small>Customer picks how many letters, a color, and types the name</small></span></label>
+          <label><input type="radio" name="kind" value="custom" ${cu ? "checked" : ""}><span>Custom order<small>Customer types a name (priced by letters) and picks colors</small></span></label>
         </div>`)}
         ${sec("Photos", "The first photo is the one customers see first.", photoTiles(d.photos, "ph", "e-file"))}
         ${sec("About it", "", `
@@ -703,32 +700,40 @@ function viewEdit() {
 }
 function customEditor(d) {
   const cu = d.custom, many = esc(unitsWord(cu, 2));
-  return sec("Custom options", "Customers choose these on the item’s page before they can add it to the cart.", `
+  return sec("Custom options", "Customers type the name and pick the colors on the item’s page. The price is set by how many letters the name has.", `
     ${d.variants.length ? `<p class="alert" style="margin:0">This item’s ${plural(d.variants.length, "sub-item")} will be removed when you save, because custom orders don’t use sub-items.</p>` : ""}
     <div class="two">
-      <div class="field"><label for="c-unit">What do customers count? <span class="opt">One, like “letter”</span></label><input class="input" id="c-unit" name="cUnit" value="${esc(cu.unit)}" placeholder="letter"></div>
-      <div class="field"><label for="c-incl">Included in the base price</label><div class="adorn post"><input class="input" id="c-incl" name="cIncluded" inputmode="numeric" value="${cu.included}" placeholder="4"><span>${many}</span></div></div>
+      <div class="field"><label for="c-tlabel">What do customers type?</label><input class="input" id="c-tlabel" name="cTextLabel" value="${esc(cu.textLabel)}" placeholder="Name"></div>
+      <div class="field"><label for="c-unit">Each character is one… <span class="opt">Like “letter”</span></label><input class="input" id="c-unit" name="cUnit" value="${esc(cu.unit)}" placeholder="letter"></div>
     </div>
     <div class="two">
+      <div class="field"><label for="c-incl">Included in the base price</label><div class="adorn post"><input class="input" id="c-incl" name="cIncluded" inputmode="numeric" value="${cu.included}" placeholder="4"><span>${many}</span></div></div>
       <div class="field"><label for="c-extra">Each extra ${esc(cu.unit)} costs</label><div class="adorn pre"><span>$</span><input class="input" id="c-extra" name="cExtra" inputmode="decimal" value="${cu.extra}" placeholder="1.00"></div></div>
-      <div class="two" style="gap:10px">
-        <div class="field"><label for="c-min">Fewest</label><input class="input" id="c-min" name="cMin" inputmode="numeric" value="${cu.min}" placeholder="1"></div>
-        <div class="field"><label for="c-max">Most</label><input class="input" id="c-max" name="cMax" inputmode="numeric" value="${cu.max}" placeholder="12"></div>
-      </div>
     </div>
+    <div class="two">
+      <div class="field"><label for="c-min">Shortest allowed</label><div class="adorn post"><input class="input" id="c-min" name="cMin" inputmode="numeric" value="${cu.min}" placeholder="1"><span>${many}</span></div></div>
+      <div class="field"><label for="c-max">Longest allowed</label><div class="adorn post"><input class="input" id="c-max" name="cMax" inputmode="numeric" value="${cu.max}" placeholder="12"><span>${many}</span></div></div>
+    </div>
+    <p class="fine" style="margin:0">Spaces and symbols count as ${many} too.</p>
     <div class="example" id="cExample"></div>
-    <div class="field"><span class="label" style="margin:0">Colors <span class="opt">Customers see only the color, no name. Leave empty to skip this step.</span></span>
-      ${cu.colors.length ? `<div class="csw-list">${cu.colors.map((h, i) => `<span class="csw-edit"><i style="background:${esc(h)}"></i><code>${esc(h)}</code><button type="button" class="x" data-color-del="${i}" aria-label="Remove ${esc(h)}">×</button></span>`).join("")}</div>` : ""}
-      <div class="add-color">
-        <input type="color" id="c-pick" value="#000000" aria-label="Pick a color">
-        <input class="input" id="c-hex" placeholder="#000000" maxlength="200" aria-label="Color code, like #FF0000" autocomplete="off">
-        <button type="button" class="btn line" data-color-add>Add color</button>
-      </div>
+    <div class="field"><span class="label" style="margin:0">Color choices <span class="opt">Customers pick one color for each. They see only the color, no name.</span></span>
+      <div class="csets">${cu.colorSets.map((set, si) => `<div class="cset">
+        <div class="cset-head">
+          <div class="field" style="flex:1"><label for="c-set${si}">What is color choice ${si + 1} for?</label><input class="input" id="c-set${si}" name="cSetLabel${si}" value="${esc(set.label)}" placeholder="e.g. Base & letter color"></div>
+          <button type="button" class="x" data-set-del="${si}" aria-label="Remove color choice ${si + 1}" title="Remove this color choice">×</button>
+        </div>
+        ${set.colors.length ? `<div class="csw-list">${set.colors.map((h, i) => `<span class="csw-edit"><i style="background:${esc(h)}"></i><code>${esc(h)}</code><button type="button" class="x" data-color-del="${si}:${i}" aria-label="Remove ${esc(h)}">×</button></span>`).join("")}</div>` : ""}
+        <div class="add-color">
+          <input type="color" id="c-pick${si}" data-pick="${si}" value="#000000" aria-label="Pick a color">
+          <input class="input" id="c-hex${si}" data-hex="${si}" placeholder="#000000" maxlength="400" aria-label="Color code, like #FF0000" autocomplete="off">
+          <button type="button" class="btn line" data-color-add="${si}">Add color</button>
+          ${si > 0 && cu.colorSets[0].colors.length ? `<button type="button" class="textbtn" data-set-copy="${si}">Use the same colors as ${esc(setLabel(cu.colorSets[0]).toLowerCase())}</button>` : ""}
+        </div>
+      </div>`).join("")}</div>
       <span class="fine">Type a code like #FF0000 (you can paste several, separated by spaces or commas), or use the color picker.</span>
       <span class="err" data-err="colors"></span>
-    </div>
-    <label class="toggle"><input type="checkbox" name="cAskText" ${cu.askText ? "checked" : ""}><span>Customer types the ${esc(cu.textLabel.toLowerCase())}<small class="toggle-hint">The number of ${many} is set from what they type. Spaces count too.</small></span></label>
-    ${cu.askText ? `<div class="field" style="max-width:320px"><label for="c-tlabel">What do they type?</label><input class="input" id="c-tlabel" name="cTextLabel" value="${esc(cu.textLabel)}" placeholder="Name"></div>` : ""}`);
+      <button type="button" class="ch-add" data-set-add><span>+</span> Add a color choice</button>
+    </div>`);
 }
 const hexList = t => [...new Set(String(t).split(/[\s,;]+/).map(x => x.trim().toUpperCase()).filter(Boolean).map(x => x.startsWith("#") ? x : "#" + x))];
 function viewSubEdit() {
@@ -771,8 +776,8 @@ function readDraft() {
     c.extra = Math.max(0, r2(numIn(v("cExtra")) || 0));
     c.min = Math.min(60, Math.max(1, int("cMin", 1)));
     c.max = Math.min(60, Math.max(c.min, int("cMax", 12)));
-    c.askText = f.elements.cAskText.checked;
-    if (f.elements.cTextLabel) c.textLabel = v("cTextLabel").trim() || "Name";
+    c.textLabel = v("cTextLabel").trim() || "Name";
+    c.colorSets.forEach((set, i) => { if (f.elements["cSetLabel" + i]) set.label = v("cSetLabel" + i).trim(); });
   }
   d.photo = d.photos[0] || "";
 }
@@ -814,7 +819,12 @@ function saveSub(form) {
 async function saveProduct(form) {
   readDraft(); const d = admin.draft, errs = {};
   if (!d.name.trim()) errs.name = "Give the item a name.";
-  if (d.custom) { if (!(d.price > 0)) errs.price = "Enter the base price, like 4.00."; }
+  if (d.custom) {
+    if (!(d.price > 0)) errs.price = "Enter the base price, like 4.00.";
+    const i = d.custom.colorSets.findIndex(x => !x.label), j = d.custom.colorSets.findIndex(x => !x.colors.length);
+    if (i >= 0) errs.colors = `Color choice ${i + 1} needs a name, like “Keys color”, so customers know what they’re picking.`;
+    else if (j >= 0) errs.colors = `Add at least one color to “${d.custom.colorSets[j].label}”, or remove it.`;
+  }
   else if (!d.variants.length && !(d.price > 0)) errs.price = "Enter a price, like 7.99.";
   else if (d.variants.some(c => !(priceOf(d, c) > 0))) errs.variants = `${d.variants.find(c => !(priceOf(d, c) > 0)).name} needs a price. Open it and add one, or set a price for the whole item.`;
   if (showErrs(form, errs)) { form.querySelector(".err:not(:empty)")?.scrollIntoView({ behavior: "smooth", block: "center" }); return; }
@@ -1080,19 +1090,18 @@ document.addEventListener("click", async e => {
     const fromPage = "fromPage" in ds, v = choiceOf(p, ui.sel[p.id]);
     if (isCustom(p)) {
       if (!fromPage) { go("item-" + p.id); return; }
-      const s = custSel(p.id), cu = p.custom, k = letterCount(s.text);
-      const msg = !s.n ? `Choose how many ${unitsWord(cu, 2)} first.`
-        : cu.colors.length && !s.color ? "Choose a color first."
-        : cu.askText && !k ? `Type the ${cu.textLabel.toLowerCase()} first.`
-        : cu.askText && k > cu.max ? `That’s ${k} ${unitsWord(cu, k)} (spaces count). The most is ${cu.max}.`
-        : cu.askText && k > s.n ? `“${cleanText(s.text)}” is ${k} ${unitsWord(cu, k)} (spaces count). Choose ${k}${k < cu.max ? " or more" : ""}.` : "";
+      const s = custSel(p.id), cu = p.custom, k = letterCount(s.text), miss = cu.colorSets.findIndex((_, i) => !s.colors[i]);
+      const msg = !k ? `Type the ${cu.textLabel.toLowerCase()} first.`
+        : k > cu.max ? `That’s ${k} ${unitsWord(cu, k)} (spaces count). The most is ${cu.max}.`
+        : k < cu.min ? `That’s ${k} ${unitsWord(cu, k)}. It needs at least ${cu.min}.`
+        : miss >= 0 ? `Choose the ${setLabel(cu.colorSets[miss]).toLowerCase()} first.` : "";
       if (msg) {
         const err = document.getElementById("chErr"); err.textContent = msg;
         const fs = err.closest(".choose"); fs.classList.remove("shake"); void fs.offsetWidth; fs.classList.add("shake");
         fs.scrollIntoView({ behavior: "smooth", block: "center" }); return;
       }
-      addToCart(p.id, ui.qty[p.id] || 1, undefined, { n: s.n, ...(cu.colors.length ? { color: s.color } : {}), ...(cu.askText ? { text: cleanText(s.text) } : {}) });
-      if (cu.askText) { s.text = ""; s.n = 0; ui.qty[p.id] = 1; render(true); } else updateProduct(p.id); // ready for the next name
+      addToCart(p.id, ui.qty[p.id] || 1, undefined, { text: cleanText(s.text), colors: cu.colorSets.map((_, i) => s.colors[i]) });
+      s.text = ""; ui.qty[p.id] = 1; render(true); // ready for the next name (colors stay picked)
       return;
     }
     if (hasChoices(p) && !v) {
@@ -1130,16 +1139,20 @@ document.addEventListener("click", async e => {
   if (ds.phMain !== undefined) { readDraft(); const ph = admin.draft.photos; ph.unshift(...ph.splice(Number(ds.phMain), 1)); admin.dirty = true; render(true); return; }
   if (ds.sphDel !== undefined) { readSub(); admin.sub.d.photos.splice(Number(ds.sphDel), 1); render(true); return; }
   if (ds.sphMain !== undefined) { readSub(); const ph = admin.sub.d.photos; ph.unshift(...ph.splice(Number(ds.sphMain), 1)); render(true); return; }
-  if ("colorAdd" in ds) {
-    readDraft(); const c = admin.draft.custom, box = document.getElementById("c-hex");
-    const list = hexList(box.value || document.getElementById("c-pick").value), bad = list.filter(h => !/^#[0-9A-F]{6}$/.test(h));
+  if (ds.colorAdd !== undefined) {
+    readDraft(); const si = Number(ds.colorAdd), set = admin.draft.custom.colorSets[si], box = document.getElementById("c-hex" + si);
+    const list = hexList(box.value || document.getElementById("c-pick" + si).value), bad = list.filter(h => !/^#[0-9A-F]{6}$/.test(h));
     if (!list.length) { toast("Type a color code like #FF0000, or pick a color"); return; }
     if (bad.length) { toast(`“${bad[0]}” isn’t a color code. Use 6 characters, like #FF0000.`); return; }
-    const added = list.filter(h => !c.colors.includes(h)); c.colors.push(...added); c.colors = c.colors.slice(0, 40);
-    admin.dirty = true; render(true); document.getElementById("c-hex")?.focus();
+    const added = list.filter(h => !set.colors.includes(h)); set.colors.push(...added); set.colors = set.colors.slice(0, 40);
+    admin.dirty = true; render(true); document.getElementById("c-hex" + si)?.focus();
     toast(added.length ? `${plural(added.length, "color")} added. Remember to save.` : "That color is already on the list."); return;
   }
-  if (ds.colorDel !== undefined) { readDraft(); admin.draft.custom.colors.splice(Number(ds.colorDel), 1); admin.dirty = true; render(true); return; }
+  if (ds.colorDel !== undefined) { readDraft(); const [si, i] = ds.colorDel.split(":").map(Number); admin.draft.custom.colorSets[si].colors.splice(i, 1); admin.dirty = true; render(true); return; }
+  if ("setAdd" in ds) { readDraft(); const sets = admin.draft.custom.colorSets; if (sets.length >= 6) { toast("You can have up to 6 color choices."); return; }
+    sets.push({ label: "", colors: [] }); admin.dirty = true; render(true); document.getElementById("c-set" + (sets.length - 1))?.focus(); return; }
+  if (ds.setDel !== undefined) { readDraft(); admin.draft.custom.colorSets.splice(Number(ds.setDel), 1); admin.dirty = true; render(true); return; }
+  if (ds.setCopy !== undefined) { readDraft(); const sets = admin.draft.custom.colorSets; sets[Number(ds.setCopy)].colors = [...sets[0].colors]; admin.dirty = true; render(true); return; }
   if ("subAdd" in ds) { openSub(-1, { id: "", name: "", price: null, photos: [], photo: "", blurb: "", included: [], soldOut: false }); return; }
   if (ds.subEdit !== undefined) { const i = Number(ds.subEdit); openSub(i, structuredClone(admin.draft.variants[i])); return; }
   if (ds.subDup !== undefined) { const v = structuredClone(admin.draft.variants[Number(ds.subDup)]); openSub(-1, { ...v, id: "", name: v.name + " (copy)" }); setTimeout(() => document.getElementById("s-name")?.select(), 0); return; }
@@ -1199,11 +1212,9 @@ document.addEventListener("input", e => {
   if ("qty" in t.dataset && t.dataset.ctx === "pq") { const n = parseInt(t.value); if (n >= 1) setQty("pq", t.dataset.id, n); }
   if (t.id === "c-zip") checkZip(t.value.trim());
   if ("ctext" in t.dataset) {
-    const p = findP(t.dataset.pid), s = custSel(t.dataset.pid), k = letterCount(t.value); s.text = t.value;
-    if (k >= 1 && k <= p.custom.max) s.n = Math.max(p.custom.min, k); // the count follows the name they type
-    updateCustom(p.id);
+    custSel(t.dataset.pid).text = t.value; updateCustom(t.dataset.pid);
   }
-  if (t.id === "c-pick") { const h = document.getElementById("c-hex"); if (h) h.value = t.value.toUpperCase(); }
+  if (t.dataset.pick !== undefined) { const h = document.getElementById("c-hex" + t.dataset.pick); if (h) h.value = t.value.toUpperCase(); }
   if (t.closest("#edit") && t.type !== "file") { updatePreview(); markDirty(); }
   if (t.closest("#season") && t.type !== "file") updateSeasonPreview();
   if (t.dataset.ring !== undefined) { const v = parseFloat(t.value); admin.ddraft.rings[Number(t.dataset.ring)][t.dataset.k] = Number.isFinite(v) ? v : 0; }
@@ -1212,15 +1223,14 @@ document.addEventListener("input", e => {
 document.addEventListener("change", async e => {
   const t = e.target;
   if ("qty" in t.dataset) { const n = parseInt(t.value); t.value = setQty(t.dataset.ctx, t.dataset.id, n >= 1 ? n : 1); }
-  if ("cnt" in t.dataset && t.dataset.pid) { custSel(t.dataset.pid).n = Number(t.value); updateCustom(t.dataset.pid); }
-  if ("color" in t.dataset && t.dataset.pid) { custSel(t.dataset.pid).color = t.value; updateCustom(t.dataset.pid); }
+  if (t.dataset.color !== undefined && t.dataset.pid) { custSel(t.dataset.pid).colors[Number(t.dataset.color)] = t.value; updateCustom(t.dataset.pid); }
   if (t.name === "kind" && t.closest("#edit")) {
     readDraft(); const d = admin.draft;
     if (t.value === "custom") d.custom = d.custom || admin.lastCustom || structuredClone(CUSTOM_DEFAULT);
     else { admin.lastCustom = d.custom; d.custom = null; }
     markDirty(); render(true); return;
   }
-  if (t.name === "cAskText" || t.name === "cUnit") { readDraft(); render(true); }
+  if (t.name === "cUnit") { readDraft(); render(true); }
   if ("choice" in t.dataset && t.dataset.pid) { ui.sel[t.dataset.pid] = t.value; ui.photo[t.dataset.pid] = 0; render(true); document.querySelector(`[data-choice][value="${CSS.escape(t.value)}"]`)?.focus({ preventScroll: true }); }
 
   if (t.name === "method") {
@@ -1260,7 +1270,7 @@ document.addEventListener("change", async e => {
   }
 });
 document.addEventListener("keydown", e => {
-  if (e.key === "Enter" && e.target.id === "c-hex") { e.preventDefault(); document.querySelector("[data-color-add]")?.click(); return; }
+  if (e.key === "Enter" && e.target.dataset && e.target.dataset.hex !== undefined) { e.preventDefault(); document.querySelector(`[data-color-add="${e.target.dataset.hex}"]`)?.click(); return; }
   if (e.key === "Escape" && (ui.searchOpen || ui.query)) { ui.searchOpen = false; ui.query = ""; render(true); }
 });
 document.addEventListener("submit", async e => {
