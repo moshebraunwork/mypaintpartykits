@@ -104,17 +104,21 @@ function cleanVariants(list) {
   return out;
 }
 const priceOf = (p, v) => (v && v.price > 0 ? v.price : p.price);
-/* Custom-order listings: the customer picks how many units (e.g. letters), a color, and can type the text.
-   The item's price covers up to `included` units; each unit over that adds `extra`.
-   { unit, min, max, included, extra, colors: ["#RRGGBB"], askText, textLabel } */
+/* Custom-order listings (e.g. name clickers): the customer types the text (a name) and picks one color
+   for each color choice the owner set up (e.g. "Base & letters", "Keys"). Every character of the text,
+   spaces included, is one unit; the item's price covers up to `included` units and each one over adds `extra`.
+   { unit, min, max, included, extra, textLabel, colorSets: [{ label, colors: ["#RRGGBB"] }] } */
 const clampInt = (v, lo, hi, dflt) => { const n = Math.floor(num(v)); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : dflt; };
 function cleanCustom(c) {
   if (!c || typeof c !== "object") return null;
   const min = clampInt(c.min, 1, 60, 1), max = clampInt(c.max, min, 60, Math.max(min, 12));
   const extra = r2(num(c.extra));
-  const colors = [...new Set((Array.isArray(c.colors) ? c.colors : []).map(x => String(x || "").trim().toUpperCase()).filter(x => /^#[0-9A-F]{6}$/.test(x)))].slice(0, 40);
+  const hexes = list => [...new Set((Array.isArray(list) ? list : []).map(x => String(x || "").trim().toUpperCase()).filter(x => /^#[0-9A-F]{6}$/.test(x)))].slice(0, 40);
+  // older listings had a single unnamed color list
+  const sets = Array.isArray(c.colorSets) ? c.colorSets : Array.isArray(c.colors) && c.colors.length ? [{ label: "Color", colors: c.colors }] : [];
+  const colorSets = sets.slice(0, 6).filter(s => s && typeof s === "object").map(s => ({ label: str(s.label, 40), colors: hexes(s.colors) }));
   return { unit: str(c.unit, 30) || "letter", min, max, included: clampInt(c.included, 0, 60, 0),
-    extra: extra >= 0 && extra < 10000 ? extra : 0, colors, askText: !!c.askText, textLabel: str(c.textLabel, 40) || "Name" };
+    extra: extra >= 0 && extra < 10000 ? extra : 0, textLabel: str(c.textLabel, 40) || "Name", colorSets };
 }
 const unitsWord = (c, n) => n === 1 ? c.unit : /(s|x|z|ch|sh)$/i.test(c.unit) ? c.unit + "es" : c.unit + "s";
 const customPrice = (p, n) => r2(p.price + Math.max(0, n - p.custom.included) * p.custom.extra);
@@ -210,12 +214,13 @@ function buildOrder(body) {
     let v = null, cu = null;
     if (p.custom) {
       const c = p.custom, sel = it.c && typeof it.c === "object" ? it.c : {};
-      const n = Math.floor(num(sel.n)), color = String(sel.color || "").toUpperCase(), text = cleanText(str(sel.text, 80));
-      if (!(n >= c.min && n <= c.max)) { errors.items = `Choose how many ${unitsWord(c, 2)} for ${p.name}.`; continue; }
-      if (c.colors.length && !c.colors.includes(color)) { errors.items = `Choose a color for ${p.name}.`; continue; }
-      if (c.askText && !text) { errors.items = `Enter the ${c.textLabel.toLowerCase()} for ${p.name}.`; continue; }
-      if (c.askText && letterCount(text) > n) { errors.items = `“${text}” has ${letterCount(text)} ${unitsWord(c, 2)} (spaces count) but ${n} were chosen for ${p.name}.`; continue; }
-      cu = { n, unit: unitsWord(c, n), ...(c.colors.length ? { color } : {}), ...(c.askText ? { text, textLabel: c.textLabel } : {}) };
+      const text = cleanText(str(sel.text, 80)), n = letterCount(text), picked = Array.isArray(sel.colors) ? sel.colors : [];
+      if (!text) { errors.items = `Enter the ${c.textLabel.toLowerCase()} for ${p.name}.`; continue; }
+      if (n < c.min || n > c.max) { errors.items = `“${text}” is ${n} ${unitsWord(c, n)} (spaces count). ${p.name} takes ${c.min}–${c.max}.`; continue; }
+      const colors = c.colorSets.map((s, i) => ({ label: s.label || "Color", color: String(picked[i] || "").toUpperCase(), ok: s.colors.includes(String(picked[i] || "").toUpperCase()) }));
+      const miss = colors.find(x => !x.ok);
+      if (miss) { errors.items = `Choose the ${miss.label.toLowerCase()} for ${p.name}.`; continue; }
+      cu = { n, unit: unitsWord(c, n), text, textLabel: c.textLabel, colors: colors.map(({ label, color }) => ({ label, color })) };
     } else if (p.variants.length) {
       v = p.variants.find(x => x.id === it.v);
       if (!v) { errors.items = `Choose a ${(p.chooseLabel || "option").toLowerCase()} for ${p.name}.`; continue; }
@@ -249,7 +254,8 @@ function buildOrder(body) {
   return { errors, order: { items, full, save: r2(full - subtotal), subtotal, delivery, total: r2(subtotal + delivery),
     name, phone, email, method, address, date: str(body.date, 20), notes: str(body.notes, 2000) } };
 }
-const customText = c => [`${c.n} ${c.unit}`, c.color ? `color ${c.color}` : "", c.text ? `${c.textLabel || "Text"}: “${c.text}”` : ""].filter(Boolean).join(", ");
+const customText = c => [c.text ? `${c.textLabel || "Text"}: “${c.text}”` : "", `${c.n} ${c.unit}`, c.color ? `color ${c.color}` : "",
+  ...(c.colors || []).map(x => `${x.label}: ${x.color}`)].filter(Boolean).join(", ");
 function orderEmail(o) {
   const addr = o.address ? `${o.address.street}${o.address.unit ? ", " + o.address.unit : ""}, ${o.address.city}, ${o.address.state} ${o.address.zip}` : "";
   return {
@@ -439,6 +445,7 @@ app.post("/api/admin/products", requireAdmin, (req, res) => {
   else if (new Set(names).size < names.length) errors.variants = "Two sub-items have the same name.";
   else if (!p.variants.length && !(p.price > 0)) errors.price = p.custom ? "Enter the base price, like 4.00." : "Enter a price, like 7.99.";
   else if (p.variants.some(v => !(priceOf(p, v) > 0))) errors.variants = "Give each sub-item a price, or set one price for the whole item.";
+  if (p.custom && p.custom.colorSets.some(s => !s.label || !s.colors.length)) errors.colors = "Every color choice needs a name and at least one color.";
   if (Object.keys(errors).length) return res.status(400).json({ error: "Please fix the highlighted fields.", errors });
   const customJson = p.custom ? JSON.stringify(p.custom) : "";
   let id = typeof b.id === "string" && findProduct(b.id) ? b.id : null;
