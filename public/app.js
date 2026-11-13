@@ -465,6 +465,7 @@ function viewDone() {
     <div class="receipt">${o.items.map(i => `<div class="sum-row"><span>${i.qty} × ${esc(i.name)}${i.variant ? `<br><small>${esc(choiceText(i.label, i.variant))}</small>` : ""}</span><span>${money(i.total)}</span></div>`).join("")}
       ${o.method === "delivery" ? `<div class="sum-row"><span>Delivery (estimate)</span><span>${o.delivery ? money(o.delivery) : "Free"}</span></div>` : ""}
       <div class="sum-row total"><span>Total</span><b>${money(o.total)}</b></div></div>
+    <p class="policy-note done-note"><b>Good to know:</b> each kit is packed just for your party, so once we confirm your order, all sales are final (no returns or cancellations).</p>
     <button class="btn" data-go="">Back to the shop</button>
   </div></div>`);
 }

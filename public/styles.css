@@ -197,6 +197,7 @@ select.input{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xml
 .done h1{font-size:36px}
 .done p{color:var(--muted);font-size:17px}
 .receipt{text-align:left;margin:26px 0;background:var(--surface);border-radius:20px;box-shadow:var(--shadow);padding:18px;display:grid;gap:12px}
+.done .policy-note{font-size:14px;text-align:left;margin:0 0 22px}
 .mail-body{white-space:pre-wrap;font-size:14.5px;margin-top:10px;color:var(--ink)}
 
 footer{border-top:1px solid var(--line);padding:28px 0 36px;color:var(--muted);font-size:14.5px}
