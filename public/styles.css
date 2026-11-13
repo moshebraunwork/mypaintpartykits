@@ -515,3 +515,9 @@ footer a{font-weight:600}
 .add-color input[type=color]{width:50px;height:50px;border:1.5px solid var(--line);border-radius:14px;padding:4px;background:var(--bg);cursor:pointer}
 .add-color .input{flex:1;min-width:130px;max-width:240px}
 .kind label{align-items:flex-start}
+.ctiles{display:flex;flex-wrap:wrap;gap:4px;margin-top:2px}
+.ctiles i{font-style:normal;min-width:26px;height:30px;padding:0 4px;display:grid;place-items:center;border-radius:7px;background:var(--brand-wash);color:var(--brand);font-weight:700;font-size:14.5px}
+.ctiles i.sp{font-size:11px;font-weight:600;padding:0 6px;background:transparent;border:1.5px dashed var(--brand)}
+.ctext-total{display:block;margin-top:6px;font-size:13.5px;color:var(--muted)}
+.ctext-total b{color:var(--ink)}
+.ctext-count:empty{display:none}

@@ -47,7 +47,15 @@ const chooseWord = p => (p.chooseLabel || "option").trim().toLowerCase();
 const isCustom = p => !!(p && p.custom);
 const unitsWord = (c, n) => n === 1 ? c.unit : /(s|x|z|ch|sh)$/i.test(c.unit) ? c.unit + "es" : c.unit + "s";
 const customPrice = (p, n) => r2(p.price + Math.max(0, n - p.custom.included) * p.custom.extra);
-const letterCount = t => [...String(t || "").replace(/\s/g, "")].length;
+const cleanText = t => String(t || "").trim().replace(/\s+/g, " ");
+const letterCount = t => [...cleanText(t)].length; // spaces and symbols count as letters too
+// what gets counted, one box per character, so customers can see that a space is one too
+function countDetail(cu, t) {
+  const chars = [...cleanText(t)], k = chars.length, sp = chars.filter(ch => ch === " ").length;
+  if (!k) return "";
+  return `<span class="ctiles" aria-hidden="true">${chars.map(ch => ch === " " ? `<i class="sp">space</i>` : `<i>${esc(ch)}</i>`).join("")}</span>
+    <span class="ctext-total"><b>${k} ${esc(unitsWord(cu, k))}</b>${sp ? ` (including ${plural(sp, "space")})` : ""}${k > cu.max ? ` · too long, the most is ${cu.max}` : ""}</span>`;
+}
 const custSel = id => (ui.cust[id] ||= { n: 0, color: "", text: "" });
 function customOk(p, c) {
   const cu = p.custom;
@@ -329,7 +337,7 @@ function viewProduct(id) {
 function customChooser(p) {
   const cu = p.custom, s = custSel(p.id), counts = [];
   for (let n = cu.min; n <= cu.max; n++) counts.push(n);
-  const pid = esc(p.id), many = unitsWord(cu, 2), k = letterCount(s.text);
+  const pid = esc(p.id), many = unitsWord(cu, 2);
   return `<div class="choose cust">
     <fieldset class="choose"><legend class="label">How many ${esc(many)}?${REQ}<span class="opt-chosen" id="cntChosen">${s.n ? esc(`${s.n} ${unitsWord(cu, s.n)}`) : ""}</span></legend>
       <div class="cnt-grid">${counts.map(n => `<label class="ch"><input type="radio" name="cnt" value="${n}" data-cnt data-pid="${pid}" ${s.n === n ? "checked" : ""}>
@@ -341,7 +349,8 @@ function customChooser(p) {
     </fieldset>` : ""}
     ${cu.askText ? `<div class="field"><label class="label" for="ctext" style="margin:0">${esc(cu.textLabel)}${REQ}</label>
       <input class="input" id="ctext" data-ctext data-pid="${pid}" value="${esc(s.text)}" maxlength="80" autocomplete="off" placeholder="Type the ${esc(cu.textLabel.toLowerCase())}">
-      <span class="ctext-count" id="ctCount">${k ? esc(`${k} ${unitsWord(cu, k)}`) + (k > cu.max ? ` (the most is ${cu.max})` : "") : ""}</span></div>` : ""}
+      <span class="fine" id="ctHint">Every character counts as a ${esc(cu.unit)}, including spaces and symbols (like - or &amp;).</span>
+      <div class="ctext-count" id="ctCount" aria-live="polite">${countDetail(cu, s.text)}</div></div>` : ""}
     <span class="err" id="chErr"></span>
   </div>`;
 }
@@ -350,8 +359,8 @@ function updateCustom(id) { // refresh the chosen labels without redrawing (keep
   document.querySelectorAll("[data-cnt]").forEach(r => r.checked = Number(r.value) === s.n);
   const cc = document.getElementById("cntChosen"); if (cc) cc.textContent = s.n ? `${s.n} ${unitsWord(cu, s.n)}` : "";
   const co = document.getElementById("colorChosen"); if (co) co.innerHTML = s.color ? cdot(s.color) : "";
-  const k = letterCount(s.text), ct = document.getElementById("ctCount");
-  if (ct) ct.textContent = k ? `${k} ${unitsWord(cu, k)}${k > cu.max ? ` (the most is ${cu.max})` : ""}` : "";
+  const ct = document.getElementById("ctCount");
+  if (ct) ct.innerHTML = countDetail(cu, s.text);
   const err = document.getElementById("chErr"); if (err) err.textContent = "";
   updateProduct(id);
 }
@@ -718,7 +727,7 @@ function customEditor(d) {
       <span class="fine">Type a code like #FF0000 (you can paste several, separated by spaces or commas), or use the color picker.</span>
       <span class="err" data-err="colors"></span>
     </div>
-    <label class="toggle"><input type="checkbox" name="cAskText" ${cu.askText ? "checked" : ""}><span>Customer types the ${esc(cu.textLabel.toLowerCase())}<small class="toggle-hint">The number of ${many} is set from what they type</small></span></label>
+    <label class="toggle"><input type="checkbox" name="cAskText" ${cu.askText ? "checked" : ""}><span>Customer types the ${esc(cu.textLabel.toLowerCase())}<small class="toggle-hint">The number of ${many} is set from what they type. Spaces count too.</small></span></label>
     ${cu.askText ? `<div class="field" style="max-width:320px"><label for="c-tlabel">What do they type?</label><input class="input" id="c-tlabel" name="cTextLabel" value="${esc(cu.textLabel)}" placeholder="Name"></div>` : ""}`);
 }
 const hexList = t => [...new Set(String(t).split(/[\s,;]+/).map(x => x.trim().toUpperCase()).filter(Boolean).map(x => x.startsWith("#") ? x : "#" + x))];
@@ -1075,13 +1084,14 @@ document.addEventListener("click", async e => {
       const msg = !s.n ? `Choose how many ${unitsWord(cu, 2)} first.`
         : cu.colors.length && !s.color ? "Choose a color first."
         : cu.askText && !k ? `Type the ${cu.textLabel.toLowerCase()} first.`
-        : cu.askText && k > s.n ? `“${s.text.trim()}” has ${k} ${unitsWord(cu, k)}. Choose ${k}${k < cu.max ? " or more" : ""}.` : "";
+        : cu.askText && k > cu.max ? `That’s ${k} ${unitsWord(cu, k)} (spaces count). The most is ${cu.max}.`
+        : cu.askText && k > s.n ? `“${cleanText(s.text)}” is ${k} ${unitsWord(cu, k)} (spaces count). Choose ${k}${k < cu.max ? " or more" : ""}.` : "";
       if (msg) {
         const err = document.getElementById("chErr"); err.textContent = msg;
         const fs = err.closest(".choose"); fs.classList.remove("shake"); void fs.offsetWidth; fs.classList.add("shake");
         fs.scrollIntoView({ behavior: "smooth", block: "center" }); return;
       }
-      addToCart(p.id, ui.qty[p.id] || 1, undefined, { n: s.n, ...(cu.colors.length ? { color: s.color } : {}), ...(cu.askText ? { text: s.text.trim() } : {}) });
+      addToCart(p.id, ui.qty[p.id] || 1, undefined, { n: s.n, ...(cu.colors.length ? { color: s.color } : {}), ...(cu.askText ? { text: cleanText(s.text) } : {}) });
       if (cu.askText) { s.text = ""; s.n = 0; ui.qty[p.id] = 1; render(true); } else updateProduct(p.id); // ready for the next name
       return;
     }

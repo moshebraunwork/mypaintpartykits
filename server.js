@@ -118,7 +118,8 @@ function cleanCustom(c) {
 }
 const unitsWord = (c, n) => n === 1 ? c.unit : /(s|x|z|ch|sh)$/i.test(c.unit) ? c.unit + "es" : c.unit + "s";
 const customPrice = (p, n) => r2(p.price + Math.max(0, n - p.custom.included) * p.custom.extra);
-const letterCount = t => [...String(t || "").replace(/\s/g, "")].length;
+const cleanText = t => String(t || "").trim().replace(/\s+/g, " ");
+const letterCount = t => [...cleanText(t)].length; // spaces and symbols count as letters too
 const variantPhotos = p => p.variants.flatMap(v => v.photos);
 const allProducts = () => db.prepare("SELECT * FROM products ORDER BY created_at").all().map(rowToProduct);
 const findProduct = id => rowToProduct(db.prepare("SELECT * FROM products WHERE id=?").get(id));
@@ -209,11 +210,11 @@ function buildOrder(body) {
     let v = null, cu = null;
     if (p.custom) {
       const c = p.custom, sel = it.c && typeof it.c === "object" ? it.c : {};
-      const n = Math.floor(num(sel.n)), color = String(sel.color || "").toUpperCase(), text = str(sel.text, 80);
+      const n = Math.floor(num(sel.n)), color = String(sel.color || "").toUpperCase(), text = cleanText(str(sel.text, 80));
       if (!(n >= c.min && n <= c.max)) { errors.items = `Choose how many ${unitsWord(c, 2)} for ${p.name}.`; continue; }
       if (c.colors.length && !c.colors.includes(color)) { errors.items = `Choose a color for ${p.name}.`; continue; }
       if (c.askText && !text) { errors.items = `Enter the ${c.textLabel.toLowerCase()} for ${p.name}.`; continue; }
-      if (c.askText && letterCount(text) > n) { errors.items = `“${text}” has more ${unitsWord(c, 2)} than you chose for ${p.name}.`; continue; }
+      if (c.askText && letterCount(text) > n) { errors.items = `“${text}” has ${letterCount(text)} ${unitsWord(c, 2)} (spaces count) but ${n} were chosen for ${p.name}.`; continue; }
       cu = { n, unit: unitsWord(c, n), ...(c.colors.length ? { color } : {}), ...(c.askText ? { text, textLabel: c.textLabel } : {}) };
     } else if (p.variants.length) {
       v = p.variants.find(x => x.id === it.v);
