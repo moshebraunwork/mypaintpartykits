@@ -402,7 +402,7 @@ function viewCheckout() {
         <div class="field"><label for="c-notes">Notes <span class="opt">Optional</span></label><textarea class="input" id="c-notes" name="notes" placeholder="Party date, number of kids, questions…"></textarea></div>
         <input type="checkbox" name="botcheck" tabindex="-1" autocomplete="off" style="position:absolute;left:-9999px" aria-hidden="true">
         <div class="alert" id="formAlert" role="alert"></div>
-        <p class="policy-note"><b>Good to know:</b> each kit is packed just for your party, so once we confirm your order, all sales are final (no returns or cancellations).</p>
+        <p class="policy-note">All sales are final (no returns or cancellations).</p>
         <button class="btn big block" type="submit">Place order request</button>
       </form>
       <aside class="summary" id="sum">${summaryInner("checkout")}</aside>
@@ -465,7 +465,6 @@ function viewDone() {
     <div class="receipt">${o.items.map(i => `<div class="sum-row"><span>${i.qty} × ${esc(i.name)}${i.variant ? `<br><small>${esc(choiceText(i.label, i.variant))}</small>` : ""}</span><span>${money(i.total)}</span></div>`).join("")}
       ${o.method === "delivery" ? `<div class="sum-row"><span>Delivery (estimate)</span><span>${o.delivery ? money(o.delivery) : "Free"}</span></div>` : ""}
       <div class="sum-row total"><span>Total</span><b>${money(o.total)}</b></div></div>
-    <p class="policy-note done-note"><b>Good to know:</b> each kit is packed just for your party, so once we confirm your order, all sales are final (no returns or cancellations).</p>
     <button class="btn" data-go="">Back to the shop</button>
   </div></div>`);
 }
