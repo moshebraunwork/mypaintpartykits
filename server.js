@@ -46,6 +46,8 @@ if (!cols.includes("photos")) {
 }
 if (!cols.includes("variants")) db.exec("ALTER TABLE products ADD COLUMN variants TEXT NOT NULL DEFAULT '[]'");
 if (!cols.includes("choose_label")) db.exec("ALTER TABLE products ADD COLUMN choose_label TEXT NOT NULL DEFAULT ''");
+// added later: "custom order" listings (customer picks how many letters/units, a color, and types a name). Empty = a regular item.
+if (!cols.includes("custom")) db.exec("ALTER TABLE products ADD COLUMN custom TEXT NOT NULL DEFAULT ''");
 const getSetting = (k, fallback) => { const r = db.prepare("SELECT value FROM settings WHERE key=?").get(k); return r ? JSON.parse(r.value) : fallback; };
 const setSetting = (k, v) => db.prepare("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(k, JSON.stringify(v));
 
@@ -78,7 +80,7 @@ function rowToProduct(r) {
   if (!photos.length && r.photo) photos = [r.photo];
   return { id: r.id, name: r.name, blurb: r.blurb, included: JSON.parse(r.included), price: r.price,
     bulkMin: r.bulk_min, bulkPct: r.bulk_pct, visible: !!r.visible, photo: photos[0] || "", photos,
-    chooseLabel: r.choose_label || "", variants: JSON.parse(r.variants || "[]").map(v => {
+    chooseLabel: r.choose_label || "", custom: r.custom ? cleanCustom(JSON.parse(r.custom)) : null, variants: JSON.parse(r.variants || "[]").map(v => {
       const ph = Array.isArray(v.photos) ? v.photos : v.photo ? [v.photo] : [];
       return { id: v.id, name: v.name, price: v.price, photos: ph, photo: ph[0] || "", blurb: v.blurb || v.note || "", included: v.included || [], soldOut: !!v.soldOut };
     }) };
@@ -102,6 +104,22 @@ function cleanVariants(list) {
   return out;
 }
 const priceOf = (p, v) => (v && v.price > 0 ? v.price : p.price);
+/* Custom-order listings: the customer picks how many units (e.g. letters), a color, and can type the text.
+   The item's price covers up to `included` units; each unit over that adds `extra`.
+   { unit, min, max, included, extra, colors: ["#RRGGBB"], askText, textLabel } */
+const clampInt = (v, lo, hi, dflt) => { const n = Math.floor(num(v)); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : dflt; };
+function cleanCustom(c) {
+  if (!c || typeof c !== "object") return null;
+  const min = clampInt(c.min, 1, 60, 1), max = clampInt(c.max, min, 60, Math.max(min, 12));
+  const extra = r2(num(c.extra));
+  const colors = [...new Set((Array.isArray(c.colors) ? c.colors : []).map(x => String(x || "").trim().toUpperCase()).filter(x => /^#[0-9A-F]{6}$/.test(x)))].slice(0, 40);
+  return { unit: str(c.unit, 30) || "letter", min, max, included: clampInt(c.included, 0, 60, 0),
+    extra: extra >= 0 && extra < 10000 ? extra : 0, colors, askText: !!c.askText, textLabel: str(c.textLabel, 40) || "Name" };
+}
+const unitsWord = (c, n) => n === 1 ? c.unit : /(s|x|z|ch|sh)$/i.test(c.unit) ? c.unit + "es" : c.unit + "s";
+const customPrice = (p, n) => r2(p.price + Math.max(0, n - p.custom.included) * p.custom.extra);
+const cleanText = t => String(t || "").trim().replace(/\s+/g, " ");
+const letterCount = t => [...cleanText(t)].length; // spaces and symbols count as letters too
 const variantPhotos = p => p.variants.flatMap(v => v.photos);
 const allProducts = () => db.prepare("SELECT * FROM products ORDER BY created_at").all().map(rowToProduct);
 const findProduct = id => rowToProduct(db.prepare("SELECT * FROM products WHERE id=?").get(id));
@@ -189,19 +207,28 @@ function buildOrder(body) {
     const p = findProduct(String(it.id || ""));
     const qty = Math.floor(num(it.qty));
     if (!p || !p.visible || !(qty >= 1 && qty <= 999)) continue;
-    let v = null;
-    if (p.variants.length) {
+    let v = null, cu = null;
+    if (p.custom) {
+      const c = p.custom, sel = it.c && typeof it.c === "object" ? it.c : {};
+      const n = Math.floor(num(sel.n)), color = String(sel.color || "").toUpperCase(), text = cleanText(str(sel.text, 80));
+      if (!(n >= c.min && n <= c.max)) { errors.items = `Choose how many ${unitsWord(c, 2)} for ${p.name}.`; continue; }
+      if (c.colors.length && !c.colors.includes(color)) { errors.items = `Choose a color for ${p.name}.`; continue; }
+      if (c.askText && !text) { errors.items = `Enter the ${c.textLabel.toLowerCase()} for ${p.name}.`; continue; }
+      if (c.askText && letterCount(text) > n) { errors.items = `“${text}” has ${letterCount(text)} ${unitsWord(c, 2)} (spaces count) but ${n} were chosen for ${p.name}.`; continue; }
+      cu = { n, unit: unitsWord(c, n), ...(c.colors.length ? { color } : {}), ...(c.askText ? { text, textLabel: c.textLabel } : {}) };
+    } else if (p.variants.length) {
       v = p.variants.find(x => x.id === it.v);
       if (!v) { errors.items = `Choose a ${(p.chooseLabel || "option").toLowerCase()} for ${p.name}.`; continue; }
       if (v.soldOut) { errors.items = `${p.name} (${v.name}) is sold out. Please remove it from your cart.`; continue; }
     }
-    const same = lines.find(l => l.p.id === p.id && l.v === v);
-    if (same) same.qty = Math.min(999, same.qty + qty); else lines.push({ p, qty, v });
+    const ck = JSON.stringify(cu);
+    const same = lines.find(l => l.p.id === p.id && l.v === v && l.ck === ck);
+    if (same) same.qty = Math.min(999, same.qty + qty); else lines.push({ p, qty, v, cu, ck });
     perItem[p.id] = (perItem[p.id] || 0) + qty;
   }
-  const items = lines.map(({ p, qty, v }) => {
-    const r = priceFor(p, qty, perItem[p.id], priceOf(p, v));
-    return { id: p.id, name: p.name, ...(v ? { variant: v.name, variantId: v.id, label: p.chooseLabel } : {}), qty, unit: r.unit, total: r.total, full: r.full, bulk: r.bulk, pct: p.bulkPct };
+  const items = lines.map(({ p, qty, v, cu }) => {
+    const r = priceFor(p, qty, perItem[p.id], cu ? customPrice(p, cu.n) : priceOf(p, v));
+    return { id: p.id, name: p.name, ...(v ? { variant: v.name, variantId: v.id, label: p.chooseLabel } : {}), ...(cu ? { custom: cu } : {}), qty, unit: r.unit, total: r.total, full: r.full, bulk: r.bulk, pct: p.bulkPct };
   });
   if (!items.length && !errors.items) errors.items = "Your cart is empty or an item is no longer available.";
   const subtotal = r2(items.reduce((s, i) => s + i.total, 0)), full = r2(items.reduce((s, i) => s + i.full, 0));
@@ -222,13 +249,14 @@ function buildOrder(body) {
   return { errors, order: { items, full, save: r2(full - subtotal), subtotal, delivery, total: r2(subtotal + delivery),
     name, phone, email, method, address, date: str(body.date, 20), notes: str(body.notes, 2000) } };
 }
+const customText = c => [`${c.n} ${c.unit}`, c.color ? `color ${c.color}` : "", c.text ? `${c.textLabel || "Text"}: “${c.text}”` : ""].filter(Boolean).join(", ");
 function orderEmail(o) {
   const addr = o.address ? `${o.address.street}${o.address.unit ? ", " + o.address.unit : ""}, ${o.address.city}, ${o.address.state} ${o.address.zip}` : "";
   return {
     subject: `New order ${o.id}: ${o.items.reduce((s, i) => s + i.qty, 0)} items, ${money(o.total)}`,
     text: `New order request ${o.id}
 
-${o.items.map(i => `• ${i.qty} × ${i.name}${i.variant ? ` (${i.label ? i.label + ": " : ""}${i.variant})` : ""} @ ${money(i.unit)}${i.bulk ? ` (${i.pct}% bulk)` : ""} = ${money(i.total)}`).join("\n")}
+${o.items.map(i => `• ${i.qty} × ${i.name}${i.variant ? ` (${i.label ? i.label + ": " : ""}${i.variant})` : ""}${i.custom ? ` (${customText(i.custom)})` : ""} @ ${money(i.unit)}${i.bulk ? ` (${i.pct}% bulk)` : ""} = ${money(i.total)}`).join("\n")}
 ${o.save > 0 ? `Bulk savings: −${money(o.save)}\n` : ""}Subtotal: ${money(o.subtotal)}
 ${o.method === "delivery" ? `Delivery (estimate): ${o.delivery ? money(o.delivery) : "Free"}\n` : ""}Total: ${money(o.total)}
 
@@ -399,8 +427,9 @@ app.post("/api/admin/products", requireAdmin, (req, res) => {
     price: r2(num(b.price)), bulkMin: Math.max(0, Math.floor(num(b.bulkMin) || 0)),
     bulkPct: Math.min(90, Math.max(0, num(b.bulkPct) || 0)), visible: !!b.visible,
     photos: [...new Set((Array.isArray(b.photos) ? b.photos : [b.photo]).map(safeUrl).filter(Boolean))].slice(0, 10),
-    variants: cleanVariants(b.variants), chooseLabel: str(b.chooseLabel, 30)
+    variants: cleanVariants(b.variants), chooseLabel: str(b.chooseLabel, 30), custom: cleanCustom(b.custom)
   };
+  if (p.custom) { p.variants = []; p.chooseLabel = ""; } // a custom-order listing has no sub-items
   p.photo = p.photos[0] || "";
   if (!(p.price > 0 && p.price < 100000)) p.price = 0;
   const errors = {};
@@ -408,21 +437,22 @@ app.post("/api/admin/products", requireAdmin, (req, res) => {
   const names = p.variants.map(v => v.name.toLowerCase());
   if (p.variants.some(v => !v.name)) errors.variants = "Every sub-item needs a name.";
   else if (new Set(names).size < names.length) errors.variants = "Two sub-items have the same name.";
-  else if (!p.variants.length && !(p.price > 0)) errors.price = "Enter a price, like 7.99.";
+  else if (!p.variants.length && !(p.price > 0)) errors.price = p.custom ? "Enter the base price, like 4.00." : "Enter a price, like 7.99.";
   else if (p.variants.some(v => !(priceOf(p, v) > 0))) errors.variants = "Give each sub-item a price, or set one price for the whole item.";
   if (Object.keys(errors).length) return res.status(400).json({ error: "Please fix the highlighted fields.", errors });
+  const customJson = p.custom ? JSON.stringify(p.custom) : "";
   let id = typeof b.id === "string" && findProduct(b.id) ? b.id : null;
   if (id) {
     const old = findProduct(id);
-    db.prepare("UPDATE products SET name=?,blurb=?,included=?,price=?,bulk_min=?,bulk_pct=?,visible=?,photo=?,photos=?,variants=?,choose_label=? WHERE id=?")
-      .run(p.name, p.blurb, JSON.stringify(p.included), p.price, p.bulkMin, p.bulkPct, p.visible ? 1 : 0, p.photo, JSON.stringify(p.photos), JSON.stringify(p.variants), p.chooseLabel, id);
+    db.prepare("UPDATE products SET name=?,blurb=?,included=?,price=?,bulk_min=?,bulk_pct=?,visible=?,photo=?,photos=?,variants=?,choose_label=?,custom=? WHERE id=?")
+      .run(p.name, p.blurb, JSON.stringify(p.included), p.price, p.bulkMin, p.bulkPct, p.visible ? 1 : 0, p.photo, JSON.stringify(p.photos), JSON.stringify(p.variants), p.chooseLabel, customJson, id);
     const keep = [...p.photos, ...variantPhotos(p)];
     for (const u of [...old.photos, ...variantPhotos(old)]) if (!keep.includes(u)) removeUpload(u);
   } else {
     const base = slug(p.name); id = base; let i = 2;
     while (findProduct(id)) id = `${base}-${i++}`;
-    db.prepare("INSERT INTO products(id,name,blurb,included,price,bulk_min,bulk_pct,visible,photo,photos,variants,choose_label,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)")
-      .run(id, p.name, p.blurb, JSON.stringify(p.included), p.price, p.bulkMin, p.bulkPct, p.visible ? 1 : 0, p.photo, JSON.stringify(p.photos), JSON.stringify(p.variants), p.chooseLabel, new Date().toISOString());
+    db.prepare("INSERT INTO products(id,name,blurb,included,price,bulk_min,bulk_pct,visible,photo,photos,variants,choose_label,custom,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+      .run(id, p.name, p.blurb, JSON.stringify(p.included), p.price, p.bulkMin, p.bulkPct, p.visible ? 1 : 0, p.photo, JSON.stringify(p.photos), JSON.stringify(p.variants), p.chooseLabel, customJson, new Date().toISOString());
   }
   res.json({ product: findProduct(id) });
 });
