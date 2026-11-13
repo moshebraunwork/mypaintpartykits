@@ -402,6 +402,7 @@ function viewCheckout() {
         <div class="field"><label for="c-notes">Notes <span class="opt">Optional</span></label><textarea class="input" id="c-notes" name="notes" placeholder="Party date, number of kids, questions…"></textarea></div>
         <input type="checkbox" name="botcheck" tabindex="-1" autocomplete="off" style="position:absolute;left:-9999px" aria-hidden="true">
         <div class="alert" id="formAlert" role="alert"></div>
+        <p class="policy-note"><b>Good to know:</b> each kit is packed just for your party, so once we confirm your order, all sales are final (no returns or cancellations).</p>
         <button class="btn big block" type="submit">Place order request</button>
       </form>
       <aside class="summary" id="sum">${summaryInner("checkout")}</aside>
