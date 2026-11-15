@@ -105,8 +105,8 @@ function cleanVariants(list) {
 }
 const priceOf = (p, v) => (v && v.price > 0 ? v.price : p.price);
 /* Custom-order listings (e.g. name clickers): the customer types the text (a name) and picks one color
-   for each color choice the owner set up (e.g. "Base & letters", "Keys"). Every character of the text,
-   spaces included, is one unit; the item's price covers up to `included` units and each one over adds `extra`.
+   for each color choice the owner set up (e.g. "Base & letters", "Keys"). The text is letters A–Z only
+   (no spaces, numbers or symbols) and each letter is one unit; the item's price covers up to `included` units and each one over adds `extra`.
    { unit, min, max, included, extra, textLabel, colorSets: [{ label, colors: ["#RRGGBB"] }] } */
 const clampInt = (v, lo, hi, dflt) => { const n = Math.floor(num(v)); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : dflt; };
 function cleanCustom(c) {
@@ -122,8 +122,8 @@ function cleanCustom(c) {
 }
 const unitsWord = (c, n) => n === 1 ? c.unit : /(s|x|z|ch|sh)$/i.test(c.unit) ? c.unit + "es" : c.unit + "s";
 const customPrice = (p, n) => r2(p.price + Math.max(0, n - p.custom.included) * p.custom.extra);
-const cleanText = t => String(t || "").trim().replace(/\s+/g, " ");
-const letterCount = t => [...cleanText(t)].length; // spaces and symbols count as letters too
+const cleanText = t => String(t || "").trim();
+const letterCount = t => [...cleanText(t)].length;
 const variantPhotos = p => p.variants.flatMap(v => v.photos);
 const allProducts = () => db.prepare("SELECT * FROM products ORDER BY created_at").all().map(rowToProduct);
 const findProduct = id => rowToProduct(db.prepare("SELECT * FROM products WHERE id=?").get(id));
@@ -216,7 +216,8 @@ function buildOrder(body) {
       const c = p.custom, sel = it.c && typeof it.c === "object" ? it.c : {};
       const text = cleanText(str(sel.text, 80)), n = letterCount(text), picked = Array.isArray(sel.colors) ? sel.colors : [];
       if (!text) { errors.items = `Enter the ${c.textLabel.toLowerCase()} for ${p.name}.`; continue; }
-      if (n < c.min || n > c.max) { errors.items = `“${text}” is ${n} ${unitsWord(c, n)} (spaces count). ${p.name} takes ${c.min}–${c.max}.`; continue; }
+      if (!/^[A-Za-z]+$/.test(text)) { errors.items = `The ${c.textLabel.toLowerCase()} for ${p.name} can only use letters A–Z (no spaces, numbers or symbols).`; continue; }
+      if (n < c.min || n > c.max) { errors.items = `“${text}” is ${n} ${unitsWord(c, n)}. ${p.name} takes ${c.min}–${c.max}.`; continue; }
       const colors = c.colorSets.map((s, i) => ({ label: s.label || "Color", color: String(picked[i] || "").toUpperCase(), ok: s.colors.includes(String(picked[i] || "").toUpperCase()) }));
       const miss = colors.find(x => !x.ok);
       if (miss) { errors.items = `Choose the ${miss.label.toLowerCase()} for ${p.name}.`; continue; }

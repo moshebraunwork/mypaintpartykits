@@ -42,24 +42,24 @@ const choiceOf = (p, vid) => (p.variants || []).find(v => v.id === vid) || null;
 const priceOf = (p, v) => (v && v.price > 0 ? v.price : p.price);
 const chooseWord = p => (p.chooseLabel || "option").trim().toLowerCase();
 /* Custom-order listings (e.g. name clickers): p.custom = { unit, min, max, included, extra, textLabel, colorSets: [{ label, colors }] }.
-   The customer types the text (a name); every character, spaces included, is one unit (letter). The item's price covers
+   The customer types the text (a name): letters A–Z only (no spaces, numbers or symbols); each letter is one unit. The item's price covers
    up to `included` units and each one over adds `extra`. Then they pick one color (a swatch, no name) for each color choice,
    e.g. "Base & letter color" and "Keys color". A cart line keeps c = { text, colors: [one per color choice] }. */
 const isCustom = p => !!(p && p.custom);
 const unitsWord = (c, n) => n === 1 ? c.unit : /(s|x|z|ch|sh)$/i.test(c.unit) ? c.unit + "es" : c.unit + "s";
 const customPrice = (p, n) => r2(p.price + Math.max(0, n - p.custom.included) * p.custom.extra);
-const cleanText = t => String(t || "").trim().replace(/\s+/g, " ");
-const letterCount = t => [...cleanText(t)].length; // spaces and symbols count as letters too
+const cleanText = t => String(t || "").replace(/[^A-Za-z]/g, ""); // names are letters A–Z only
+const letterCount = t => [...cleanText(t)].length;
 const custSel = id => (ui.cust[id] ||= { text: "", colors: [] });
 const setLabel = s => s.label || "Color";
-// what gets counted, one box per character, so customers can see that a space is one too, and what it costs
+// what gets counted, one box per letter, and what it costs
 function countDetail(p, t) {
-  const cu = p.custom, chars = [...cleanText(t)], k = chars.length, sp = chars.filter(ch => ch === " ").length;
+  const cu = p.custom, chars = [...cleanText(t)], k = chars.length;
   if (!k) return "";
   const note = k > cu.max ? `<span class="cwarn">Too long: the most is ${cu.max} ${esc(unitsWord(cu, cu.max))}.</span>`
     : k < cu.min ? `<span class="cwarn">Too short: at least ${cu.min} ${esc(unitsWord(cu, cu.min))}.</span>` : `<b class="cprice">${money(customPrice(p, k))}</b>`;
-  return `<span class="ctiles" aria-hidden="true">${chars.map(ch => ch === " " ? `<i class="sp">space</i>` : `<i>${esc(ch)}</i>`).join("")}</span>
-    <span class="ctext-total"><b>${k} ${esc(unitsWord(cu, k))}</b>${sp ? ` (including ${plural(sp, "space")})` : ""} = ${note}</span>`;
+  return `<span class="ctiles" aria-hidden="true">${chars.map(ch => `<i>${esc(ch)}</i>`).join("")}</span>
+    <span class="ctext-total"><b>${k} ${esc(unitsWord(cu, k))}</b> = ${note}</span>`;
 }
 function customOk(p, c) {
   const cu = p.custom, k = c && letterCount(c.text);
@@ -344,8 +344,9 @@ function customChooser(p) {
   const cu = p.custom, s = custSel(p.id), pid = esc(p.id), lbl = esc(cu.textLabel);
   return `<div class="choose cust">
     <div class="field"><label class="label" for="ctext" style="margin:0">${lbl}${REQ}</label>
-      <input class="input" id="ctext" data-ctext data-pid="${pid}" value="${esc(s.text)}" maxlength="80" autocomplete="off" placeholder="Type the ${esc(cu.textLabel.toLowerCase())}">
-      <span class="fine">${cu.extra > 0 && cu.included < cu.max ? `${money(p.price)} includes up to ${cu.included} ${esc(unitsWord(cu, cu.included))}. Each extra ${esc(cu.unit)} is ${money(cu.extra)}. ` : ""}Every character counts as a ${esc(cu.unit)}, including spaces and symbols (like - or &amp;).</span>
+      <input class="input" id="ctext" data-ctext data-pid="${pid}" value="${esc(s.text)}" maxlength="80" autocomplete="off" autocapitalize="words" spellcheck="false" pattern="[A-Za-z]*" placeholder="Type the ${esc(cu.textLabel.toLowerCase())}">
+      <span class="fine">${cu.extra > 0 && cu.included < cu.max ? `${money(p.price)} includes up to ${cu.included} ${esc(unitsWord(cu, cu.included))}. Each extra ${esc(cu.unit)} is ${money(cu.extra)}. ` : ""}Letters only (A–Z): no spaces, numbers or symbols.</span>
+      <span class="cwarn" id="ctWarn" role="alert"></span>
       <div class="ctext-count" id="ctCount" aria-live="polite">${countDetail(p, s.text)}</div></div>
     ${cu.colorSets.map((set, si) => `<fieldset class="choose"><legend class="label">${esc(setLabel(set))}${REQ}<span class="opt-chosen" id="colorChosen${si}">${s.colors[si] ? cdot(s.colors[si]) : ""}</span></legend>
       <div class="sw-grid">${set.colors.map((h, i) => `<label class="csw"><input type="radio" name="ccolor${si}" value="${esc(h)}" data-color="${si}" data-pid="${pid}" aria-label="${esc(setLabel(set))}, color ${i + 1} of ${set.colors.length}" ${s.colors[si] === h ? "checked" : ""}><span style="background:${esc(h)}"></span></label>`).join("")}</div>
@@ -1092,7 +1093,7 @@ document.addEventListener("click", async e => {
       if (!fromPage) { go("item-" + p.id); return; }
       const s = custSel(p.id), cu = p.custom, k = letterCount(s.text), miss = cu.colorSets.findIndex((_, i) => !s.colors[i]);
       const msg = !k ? `Type the ${cu.textLabel.toLowerCase()} first.`
-        : k > cu.max ? `That’s ${k} ${unitsWord(cu, k)} (spaces count). The most is ${cu.max}.`
+        : k > cu.max ? `That’s ${k} ${unitsWord(cu, k)}. The most is ${cu.max}.`
         : k < cu.min ? `That’s ${k} ${unitsWord(cu, k)}. It needs at least ${cu.min}.`
         : miss >= 0 ? `Choose the ${setLabel(cu.colorSets[miss]).toLowerCase()} first.` : "";
       if (msg) {
@@ -1212,7 +1213,12 @@ document.addEventListener("input", e => {
   if ("qty" in t.dataset && t.dataset.ctx === "pq") { const n = parseInt(t.value); if (n >= 1) setQty("pq", t.dataset.id, n); }
   if (t.id === "c-zip") checkZip(t.value.trim());
   if ("ctext" in t.dataset) {
-    custSel(t.dataset.pid).text = t.value; updateCustom(t.dataset.pid);
+    const clean = cleanText(t.value), w = document.getElementById("ctWarn");
+    if (clean !== t.value) { // drop anything that isn't a letter, keeping the cursor in place
+      const pos = cleanText(t.value.slice(0, t.selectionStart)).length; t.value = clean; t.setSelectionRange(pos, pos);
+      if (w) { w.textContent = "Only letters A–Z can be used: no spaces, numbers or symbols."; clearTimeout(w._t); w._t = setTimeout(() => w.textContent = "", 4000); }
+    }
+    custSel(t.dataset.pid).text = clean; updateCustom(t.dataset.pid);
   }
   if (t.dataset.pick !== undefined) { const h = document.getElementById("c-hex" + t.dataset.pick); if (h) h.value = t.value.toUpperCase(); }
   if (t.closest("#edit") && t.type !== "file") { updatePreview(); markDirty(); }
